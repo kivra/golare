@@ -10,6 +10,7 @@
 -export([start/2, stop/1]).
 
 -export([capture_event/1]).
+-export([capture_event/2]).
 
 -export([test_logger/1]).
 
@@ -24,10 +25,16 @@ start(normal, _StartArgs) ->
 stop(_State) ->
     ok.
 
+-spec capture_event(Message :: map(), Tags :: map()) -> ok.
+capture_event(Message, Tags) -> 
+    Event = maps:merge(#{message => Message}, Tags),
+    capure_event(Event).
+
 capture_event(Event) ->
     ScopeFuns = persistent_term:get({golare, process_scope}, #{}),
     ScopeValues = #{K => F() || K := F <- ScopeFuns, is_function(F, 0)},
     golare_transport:capture({event, maps:merge(ScopeValues, Event)}).
+
 
 test_logger(Event) ->
     ?LOG_ERROR(Event).
