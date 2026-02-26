@@ -36,7 +36,7 @@ event(Attrs, Interfaces) ->
         {optional, level}
     ],
     Event = lists:foldl(fun(Attr, Acc) -> attr(Attr, Attrs, Acc) end, #{}, Attributes),
-    mapz:deep_merge([Event|Interfaces]).
+    mapz:deep_merge([Event | Interfaces]).
 
 attr({_, Key}, Attrs, Acc) when is_map_key(Key, Attrs) ->
     Value = maps:get(Key, Attrs),

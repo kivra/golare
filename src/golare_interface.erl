@@ -174,16 +174,24 @@ exception_stacktrace_frame({Module, Function, Args, Meta}) ->
         end,
     File = proplists:get_value(file, Meta),
     #{
-        in_app =>
-            case File of
-                "/" ++ _ -> true;
-                _ -> false
-            end,
+        in_app => exception_stacktrace_frame_in_app(File),
         function => iolist_to_binary(io_lib:format("~p/~p", [Function, Arity])),
         filename => Module,
         abs_path => iolist_to_binary(File),
         lineno => proplists:get_value(line, Meta)
     }.
+
+exception_stacktrace_frame_in_app("/" ++ _ = File) ->
+    % Rebar3 keeps dependency source trees under `_build`, so absolute paths
+    % that do not contain `_build` are treated as application code.
+    case string:find(File, ~"/_build/") of
+        nomatch -> true;
+        _Match -> false
+    end;
+exception_stacktrace_frame_in_app(_File) ->
+    % OTP module frames typically don't include absolute file paths and should
+    % not be treated as application code.
+    false.
 
 request_cowboy_url({Scope, Req0}) ->
     URL = uri_string:recompose(#{
