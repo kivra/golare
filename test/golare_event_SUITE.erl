@@ -17,6 +17,7 @@ all() ->
         timestamp_invalid,
         exception,
         exception_handled,
+        exception_in_app,
         message,
         request,
         thread,
@@ -85,6 +86,40 @@ exception_handled(_Config) ->
                     value := ~"undef",
                     mechanism := #{type := auto, handled := true},
                     stacktrace := #{frames := []}
+                }
+            ]
+        },
+        Result
+    ),
+    ?assertJSON(Result).
+
+exception_in_app(_Config) ->
+    Result = golare:event(#{}, [
+        golare_interface:exception(error, test_error, [
+            {module, function, [a, b, c], [
+                {file, "/project/src/full_build/module.erl"}, {line, 123}
+            ]},
+            {library, utility, 2, [
+                {file, "/project/_build/default/lib/library/src/library.erl"}, {line, 456}
+            ]},
+            {lists, all, 2, [
+                {file, "lists.erl"}, {line, 2313}
+            ]}
+        ])
+    ]),
+    ?assertMatch(
+        #{
+            exception := [
+                #{
+                    type := error,
+                    value := ~"test_error",
+                    stacktrace := #{
+                        frames := [
+                            #{filename := lists, in_app := false},
+                            #{filename := library, in_app := false},
+                            #{filename := module, in_app := true}
+                        ]
+                    }
                 }
             ]
         },
