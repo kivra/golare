@@ -63,7 +63,8 @@ log(LogEvent, _Config) ->
             timestamp => event_timestamp(LogEvent)
         },
         Event1 = logger_name(Event0, LogEvent),
-        Event = describe(Event1, LogEvent),
+        Event2 = describe(Event1, LogEvent),
+        Event = maybe_exception(Event2, LogEvent),
         {ok, _EventId} = golare:capture_event(Event)
     catch
         exit:{noproc, _} ->
@@ -311,6 +312,53 @@ describe_log(E0, Message, Report, Meta) when is_map(Report) ->
 
 maybe_mfa(E0, _Message, _Meta) ->
     E0.
+
+%% Attach a Sentry Exception interface when the log event carries a stacktrace
+%% in its metadata, e.g. `logger:warning(Report, #{stacktrace => Stacktrace})`.
+%% Without this the stacktrace is silently dropped and Sentry shows no frames.
+%% Crash reports handled by describe/2 build their own exception/threads, so
+%% leave those untouched.
+maybe_exception(#{exception := _} = Event, _LogEvent) ->
+    Event;
+maybe_exception(#{threads := _} = Event, _LogEvent) ->
+    Event;
+maybe_exception(Event, #{meta := #{stacktrace := [_ | _] = Stacktrace}} = LogEvent) ->
+    {Class, Reason} = exception_class_reason(LogEvent),
+    maps:merge(Event, golare_interface:exception(Class, Reason, Stacktrace, #{handled => true}));
+maybe_exception(Event, _LogEvent) ->
+    Event.
+
+exception_class_reason(#{meta := #{class := Class}} = LogEvent) when is_atom(Class) ->
+    {Class, exception_reason(LogEvent)};
+exception_class_reason(LogEvent) ->
+    {error, exception_reason(LogEvent)}.
+
+exception_reason(#{msg := {report, Report}}) when is_map(Report) ->
+    map_reason(Report, [exception, reason, error, msg, message]);
+exception_reason(#{msg := {report, Report}}) when is_list(Report) ->
+    list_reason(Report, [exception, reason, error, msg, message]);
+exception_reason(#{msg := {string, Raw}}) ->
+    Raw;
+exception_reason(#{msg := {Format, Args}}) when is_list(Args) ->
+    format(Format, Args);
+exception_reason(#{msg := Msg}) ->
+    Msg.
+
+map_reason(Report, []) ->
+    Report;
+map_reason(Report, [Key | Keys]) ->
+    case Report of
+        #{Key := Value} -> Value;
+        _ -> map_reason(Report, Keys)
+    end.
+
+list_reason(Report, []) ->
+    Report;
+list_reason(Report, [Key | Keys]) ->
+    case lists:keyfind(Key, 1, Report) of
+        {Key, Value} -> Value;
+        false -> list_reason(Report, Keys)
+    end.
 
 frame({M, F, A, Opts}) ->
     case A of

@@ -68,6 +68,7 @@ groups() ->
             format_log,
             format_log_mfa,
             report_map,
+            report_meta_stacktrace,
             supervisor_crash,
             proc_lib_crash
         ]}
@@ -395,6 +396,53 @@ report_map(_Config) ->
         },
         Item
     ),
+    ok.
+
+report_meta_stacktrace(_Config) ->
+    %% Mirrors rest_prelude:do_error_response/3 in kivra_core, which logs
+    %% `?warning(Report#{exception => Ex}, #{stacktrace => Stacktrace})` where
+    %% Stacktrace is a raw process stacktrace. The last frame has no file/line
+    %% (like a BIF frame) to exercise fileless-frame handling.
+    Stacktrace = [
+        {rest_util_notification_info_content, content, 2, [
+            {file, "/buildroot/src/rest/util/rest_util_notification_info_content.erl"}, {line, 42}
+        ]},
+        {rest_prelude, do_error_response, 3, [
+            {file, "/buildroot/src/rest/rest_prelude.erl"}, {line, 487}
+        ]},
+        {erlang, apply, 2, []}
+    ],
+    Report = #{
+        reason => {"Unknown failure reason", rest_util_notification_info_content},
+        resource => rest_util_notification_info_content,
+        exception => {badmatch, false}
+    },
+    Meta = #{
+        time => 0,
+        mfa => {rest_prelude, do_error_response, 3},
+        stacktrace => Stacktrace
+    },
+    LogItem = #{level => warning, meta => Meta, msg => {report, Report}},
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    ct:pal(default, "Captured:~n~p", [Item]),
+    ?assertMatch(
+        #{
+            <<"level">> := <<"warning">>,
+            <<"logger">> := <<"rest_prelude:do_error_response/3">>,
+            <<"logentry">> := #{<<"formatted">> := _},
+            <<"exception">> := [
+                #{
+                    <<"type">> := <<"error">>,
+                    <<"value">> := <<"{badmatch,false}">>,
+                    <<"stacktrace">> := #{<<"frames">> := _}
+                }
+            ]
+        },
+        Item
+    ),
+    #{<<"exception">> := [#{<<"stacktrace">> := #{<<"frames">> := Frames}}]} = Item,
+    ?assertEqual(3, length(Frames)),
     ok.
 
 wait_for(EventId) ->
