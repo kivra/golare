@@ -54,7 +54,7 @@ capture(Capture) ->
     try
         gen_statem:call(name(), {capture, Capture}, 5000)
     catch
-        error:noproc ->
+        exit:{noproc, _} ->
             {ok, down}
     end.
 
