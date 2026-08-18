@@ -85,7 +85,18 @@ log(LogEvent, _Config) ->
                     values => [ExceptionValue]
                 }
             },
-            golare:capture_event(Crash)
+            % OTP logger removes a handler whose log/2 raises, which would end
+            % all Sentry reporting until the transport restarts and adds the
+            % handler again. Keep that structurally impossible rather than
+            % relying on every callee staying exit-free: capturing the crash
+            % report is best effort, and reporting a failure here would mean
+            % logging from inside the log handler.
+            try
+                golare:capture_event(Crash)
+            catch
+                _:_ ->
+                    ok
+            end
     end.
 
 %% Internal
