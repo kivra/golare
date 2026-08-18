@@ -49,13 +49,18 @@ start_link() ->
     Opts = [],
     gen_statem:start_link({local, name()}, ?MODULE, [], Opts).
 
--spec capture(term()) -> {ok, EventId :: uuid:uuid() | down}.
+-spec capture(term()) -> {ok, EventId :: uuid:uuid() | down | dropped}.
 capture(Capture) ->
     try
         gen_statem:call(name(), {capture, Capture}, 5000)
     catch
-        error:noproc ->
-            {ok, down}
+        exit:{noproc, _} ->
+            {ok, down};
+        exit:{timeout, _} ->
+            % The transport is alive but behind, e.g. a crash storm queueing up
+            % behind an in-flight request. Callers are logging processes, so
+            % dropping the event beats propagating an exit to them.
+            {ok, dropped}
     end.
 
 %%%===================================================================
