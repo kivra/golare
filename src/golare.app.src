@@ -13,7 +13,7 @@
         gun
     ]},
     {env, [
-        {dns, <<>>},
+        {dsn, <<>>},
         {environment, production},
         {logger_level, notice}
     ]},
