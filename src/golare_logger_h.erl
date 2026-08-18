@@ -334,8 +334,8 @@ maybe_exception(Event, #{msg := Msg} = LogEvent) ->
     case stacktrace_of(Meta, Report) of
         undefined ->
             Event;
-        Trace ->
-            Event#{
+        {Source, Trace} ->
+            Event1 = Event#{
                 exception => #{
                     values => [
                         #{
@@ -348,8 +348,22 @@ maybe_exception(Event, #{msg := Msg} = LogEvent) ->
                         }
                     ]
                 }
-            }
+            },
+            drop_duplicate_extra(Source, Event1)
     end.
+
+%% A report-sourced stacktrace is already in extra, printed by describe_log/4,
+%% and would now be sent a second time as frames. Sentry renders the frames,
+%% so keep those and drop the printed copy. A meta-sourced stacktrace leaves
+%% extra alone: the report may hold a different or malformed stacktrace value
+%% that the frames above do not represent.
+drop_duplicate_extra(report, #{extra := Extra} = Event) ->
+    case maps:remove(stacktrace, Extra) of
+        Remaining when map_size(Remaining) =:= 0 -> maps:remove(extra, Event);
+        Remaining -> Event#{extra => Remaining}
+    end;
+drop_duplicate_extra(_Source, Event) ->
+    Event.
 
 msg_report({report, Report}) when is_map(Report) ->
     Report;
@@ -359,9 +373,12 @@ msg_report(_Msg) ->
     #{}.
 
 stacktrace_of(Meta, Report) ->
-    Candidates = [maps:get(stacktrace, Meta, undefined), maps:get(stacktrace, Report, undefined)],
-    case [T || T <- Candidates, is_stacktrace(T)] of
-        [Trace | _] -> Trace;
+    Candidates = [
+        {meta, maps:get(stacktrace, Meta, undefined)},
+        {report, maps:get(stacktrace, Report, undefined)}
+    ],
+    case [{Source, T} || {Source, T} <- Candidates, is_stacktrace(T)] of
+        [Found | _] -> Found;
         [] -> undefined
     end.
 
