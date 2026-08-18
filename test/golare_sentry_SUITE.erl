@@ -70,6 +70,7 @@ groups() ->
             report_map,
             report_map_stacktrace_meta,
             report_map_stacktrace_in_report,
+            report_malformed_stacktrace_kept_in_extra,
             format_log_stacktrace_meta,
             supervisor_crash,
             proc_lib_crash
@@ -547,10 +548,52 @@ report_map_stacktrace_in_report(_Config) ->
                     }
                 ]
             },
-            <<"extra">> := #{
-                <<"class">> := _,
-                <<"stacktrace">> := _
-            }
+            <<"extra">> := #{<<"class">> := _}
+        },
+        Item
+    ),
+    %% The frames are rendered from the exception, so the printed copy that
+    %% describe_log/4 put in extra is dropped rather than sent twice.
+    #{<<"extra">> := Extra} = Item,
+    ?assertNot(maps:is_key(<<"stacktrace">>, Extra)),
+    ok.
+
+%% A report may hold a stacktrace value that is not a raw Erlang stacktrace,
+%% here pre-formatted map frames. The exception is built from metadata, so the
+%% report's own value stays in extra: dropping it would lose data that the
+%% frames do not carry.
+report_malformed_stacktrace_kept_in_extra(_Config) ->
+    MetaTrace = [
+        {rest_auth_util, authenticate, 2, [
+            {file, "/build/src/rest/rest_auth_util.erl"}, {line, 319}
+        ]}
+    ],
+    Report = #{
+        reason => badarg,
+        stacktrace => [#{module => some_mod, function => some_fun, line => 12}]
+    },
+    LogItem = #{
+        level => error,
+        meta => #{time => 0, stacktrace => MetaTrace},
+        msg => {report, Report}
+    },
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    ct:pal(default, "Captured:~n~p", [Item]),
+    ?assertMatch(
+        #{
+            <<"exception">> := #{
+                <<"values">> := [
+                    #{
+                        <<"stacktrace">> := #{
+                            <<"frames">> := [
+                                #{<<"function">> := <<"rest_auth_util:authenticate/2">>}
+                            ]
+                        }
+                    }
+                ]
+            },
+            <<"extra">> := #{<<"stacktrace">> := _}
         },
         Item
     ),
