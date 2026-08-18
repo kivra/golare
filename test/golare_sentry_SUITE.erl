@@ -68,6 +68,9 @@ groups() ->
             format_log,
             format_log_mfa,
             report_map,
+            report_map_stacktrace_meta,
+            report_map_stacktrace_in_report,
+            format_log_stacktrace_meta,
             supervisor_crash,
             proc_lib_crash
         ]}
@@ -222,7 +225,10 @@ supervisor_crash(_Config) ->
             tag => error_report, type => supervisor_report, report_cb => fun supervisor:format_log/2
         }
     },
-    LogItem = #{level => error, meta => Meta#{time => 0}, msg => Report},
+    %% A stacktrace in metadata must not override the exception that the
+    %% supervisor report already builds.
+    MetaTrace = [{erlang, apply, 2, []}],
+    LogItem = #{level => error, meta => Meta#{time => 0, stacktrace => MetaTrace}, msg => Report},
     {ok, EventId} = golare_logger_h:log(LogItem, #{}),
     {_, Item} = wait_for(EventId),
     ct:pal(default, "Captured: ~p", [Item]),
@@ -391,6 +397,205 @@ report_map(_Config) ->
                 <<"class">> := _,
                 <<"stacktrace">> := _,
                 <<"reason">> := _
+            }
+        },
+        Item
+    ),
+    ok.
+
+report_map_stacktrace_meta(_Config) ->
+    Trace = [
+        {rest_util_notification_info_content, incoming_share_from_user, 2, [
+            {file, "/build/src/rest/util/rest_util_notification_info_content.erl"}, {line, 158}
+        ]},
+        {rest_util_notification_info_content, build_shared_user, 4, [
+            {file, "/build/src/rest/util/rest_util_notification_info_content.erl"}, {line, 113}
+        ]},
+        {rest_util_notification_info_content, get_notification_info, 1, [
+            {file, "/build/src/rest/util/rest_util_notification_info_content.erl"}, {line, 65}
+        ]},
+        {s2_maybe, lift, 1, [
+            {file, "/build/_build/default/lib/stdlib2/src/s2_maybe.erl"}, {line, 76}
+        ]},
+        {greph, '-eval/3-fun-1-', 4, [
+            {file, "/build/_build/default/lib/greph/src/greph.erl"}, {line, 178}
+        ]},
+        {otel_tracer_default, with_span, 5, [
+            {file, "/build/_build/default/lib/opentelemetry/src/otel_tracer_default.erl"},
+            {line, 47}
+        ]},
+        {lists, foldl_1, 3, [{file, "lists.erl"}, {line, 2471}]}
+    ],
+    Report = #{
+        reason => {"Unknown failure reason", rest_util_notification_info_content},
+        exception => {badmatch, false},
+        resource => rest_util_notification_info_content
+    },
+    Meta = #{time => 0, stacktrace => Trace},
+    LogItem = #{level => warning, meta => Meta, msg => {report, Report}},
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    ct:pal(default, "Captured:~n~p", [Item]),
+    ?assertMatch(
+        #{
+            <<"level">> := <<"warning">>,
+            <<"logentry">> := #{
+                <<"formatted">> :=
+                    <<"{\"Unknown failure reason\",rest_util_notification_info_content}">>
+            },
+            <<"exception">> := #{
+                <<"values">> := [
+                    #{
+                        <<"type">> := <<"{badmatch,false}">>,
+                        <<"value">> :=
+                            <<"{\"Unknown failure reason\",rest_util_notification_info_content}">>,
+                        <<"mechanism">> := #{
+                            <<"type">> := <<"logging">>,
+                            <<"handled">> := true
+                        },
+                        <<"stacktrace">> := #{
+                            <<"frames">> := [
+                                #{
+                                    <<"function">> := <<"lists:foldl_1/3">>,
+                                    <<"filename">> := <<"lists.erl">>,
+                                    <<"lineno">> := 2471,
+                                    <<"in_app">> := false
+                                },
+                                #{
+                                    <<"function">> := <<"otel_tracer_default:with_span/5">>,
+                                    <<"lineno">> := 47,
+                                    <<"in_app">> := false
+                                },
+                                #{
+                                    <<"function">> := <<"greph:'-eval/3-fun-1-'/4">>,
+                                    <<"lineno">> := 178,
+                                    <<"in_app">> := false
+                                },
+                                #{
+                                    <<"function">> := <<"s2_maybe:lift/1">>,
+                                    <<"lineno">> := 76,
+                                    <<"in_app">> := false
+                                },
+                                #{
+                                    <<"function">> :=
+                                        <<"rest_util_notification_info_content:get_notification_info/1">>,
+                                    <<"lineno">> := 65,
+                                    <<"in_app">> := true
+                                },
+                                #{
+                                    <<"function">> :=
+                                        <<"rest_util_notification_info_content:build_shared_user/4">>,
+                                    <<"lineno">> := 113,
+                                    <<"in_app">> := true
+                                },
+                                #{
+                                    <<"function">> :=
+                                        <<"rest_util_notification_info_content:incoming_share_from_user/2">>,
+                                    <<"filename">> :=
+                                        <<"/build/src/rest/util/rest_util_notification_info_content.erl">>,
+                                    <<"lineno">> := 158,
+                                    <<"in_app">> := true
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        Item
+    ),
+    ok.
+
+report_map_stacktrace_in_report(_Config) ->
+    Trace = [
+        {erlang, hd, [[]], [{error_info, #{module => erl_erts_errors}}]},
+        {payment_consumer, handle_message, 1, [
+            {file, "src/payments/payment_consumer.erl"}, {line, 40}
+        ]},
+        {erlang, apply, 2, []}
+    ],
+    Report = #{
+        msg => <<"consumer crashed">>,
+        % class takes precedence over exception_class when both are present
+        class => error,
+        exception_class => throw,
+        stacktrace => Trace
+    },
+    LogItem = #{level => error, meta => #{time => 0}, msg => {report, Report}},
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    ct:pal(default, "Captured:~n~p", [Item]),
+    ?assertMatch(
+        #{
+            <<"level">> := <<"error">>,
+            <<"exception">> := #{
+                <<"values">> := [
+                    #{
+                        <<"type">> := <<"error">>,
+                        <<"value">> := <<"<<\"consumer crashed\">>">>,
+                        <<"stacktrace">> := #{
+                            <<"frames">> := [
+                                #{<<"function">> := <<"erlang:apply/2">>},
+                                #{
+                                    <<"function">> := <<"payment_consumer:handle_message/1">>,
+                                    <<"filename">> := <<"src/payments/payment_consumer.erl">>,
+                                    <<"lineno">> := 40
+                                },
+                                #{<<"function">> := <<"erlang:hd/1">>}
+                            ]
+                        }
+                    }
+                ]
+            },
+            <<"extra">> := #{
+                <<"class">> := _,
+                <<"stacktrace">> := _
+            }
+        },
+        Item
+    ),
+    ok.
+
+format_log_stacktrace_meta(_Config) ->
+    Trace = [
+        {rest_auth_util, authenticate, 2, [
+            {file, "/build/src/rest/rest_auth_util.erl"}, {line, 319}
+        ]},
+        {erlang, apply, 2, []}
+    ],
+    Meta = #{time => 0, class => throw, stacktrace => Trace},
+    LogItem = #{level => error, meta => Meta, msg => {"auth failed for ~s", ["mobile-bankid"]}},
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    ct:pal(default, "Captured:~n~p", [Item]),
+    ?assertMatch(
+        #{
+            <<"level">> := <<"error">>,
+            <<"logentry">> := #{
+                <<"formatted">> := <<"auth failed for mobile-bankid">>,
+                <<"message">> := <<"auth failed for ~s">>
+            },
+            <<"exception">> := #{
+                <<"values">> := [
+                    #{
+                        <<"type">> := <<"throw">>,
+                        <<"value">> := <<"auth failed for mobile-bankid">>,
+                        <<"mechanism">> := #{
+                            <<"type">> := <<"logging">>,
+                            <<"handled">> := true
+                        },
+                        <<"stacktrace">> := #{
+                            <<"frames">> := [
+                                #{<<"function">> := <<"erlang:apply/2">>, <<"in_app">> := false},
+                                #{
+                                    <<"function">> := <<"rest_auth_util:authenticate/2">>,
+                                    <<"lineno">> := 319,
+                                    <<"in_app">> := true
+                                }
+                            ]
+                        }
+                    }
+                ]
             }
         },
         Item

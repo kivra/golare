@@ -63,7 +63,8 @@ log(LogEvent, _Config) ->
             timestamp => event_timestamp(LogEvent)
         },
         Event1 = logger_name(Event0, LogEvent),
-        Event = describe(Event1, LogEvent),
+        Event2 = describe(Event1, LogEvent),
+        Event = maybe_exception(Event2, LogEvent),
         {ok, _EventId} = golare:capture_event(Event)
     catch
         Type:Rsn:Trace ->
@@ -318,6 +319,88 @@ describe_log(E0, Message, Report, Meta) when is_map(Report) ->
         extra => #{K => print(V) || K := V <- Report, is_atom(K)}
     }.
 
+%% Attach an exception interface when the log event carries a raw Erlang
+%% stacktrace, either in the logger metadata or in the report itself. The
+%% stacktrace makes Sentry group the event by frames instead of by message.
+%% Crash reports handled by describe/2 build their own exception or threads
+%% and are left untouched.
+maybe_exception(#{exception := _} = Event, _LogEvent) ->
+    Event;
+maybe_exception(#{threads := _} = Event, _LogEvent) ->
+    Event;
+maybe_exception(Event, #{msg := Msg} = LogEvent) ->
+    Meta = maps:get(meta, LogEvent, #{}),
+    Report = msg_report(Msg),
+    case stacktrace_of(Meta, Report) of
+        undefined ->
+            Event;
+        Trace ->
+            Event#{
+                exception => #{
+                    values => [
+                        #{
+                            type => exception_type(Report, Meta, Event),
+                            value => exception_value(Report, Event),
+                            mechanism => #{type => logging, handled => true},
+                            stacktrace => #{
+                                frames => lists:reverse([frame(T) || T <- Trace])
+                            }
+                        }
+                    ]
+                }
+            }
+    end.
+
+msg_report({report, Report}) when is_map(Report) ->
+    Report;
+msg_report({report, Report}) when is_list(Report) ->
+    maps:from_list([{K, V} || {K, V} <- Report, is_atom(K)]);
+msg_report(_Msg) ->
+    #{}.
+
+stacktrace_of(Meta, Report) ->
+    Candidates = [maps:get(stacktrace, Meta, undefined), maps:get(stacktrace, Report, undefined)],
+    case [T || T <- Candidates, is_stacktrace(T)] of
+        [Trace | _] -> Trace;
+        [] -> undefined
+    end.
+
+is_stacktrace([_ | _] = Trace) -> lists:all(fun is_stackframe/1, Trace);
+is_stacktrace(_) -> false.
+
+is_stackframe({M, F, A, Opts}) when is_atom(M), is_atom(F), is_list(Opts) ->
+    is_integer(A) orelse is_list(A);
+is_stackframe(_) ->
+    false.
+
+exception_type(#{exception := Exception}, _Meta, _Event) ->
+    print(Exception);
+exception_type(Report, Meta, Event) ->
+    case exception_class(Meta, Report) of
+        undefined -> exception_value(Report, Event);
+        Class -> print(Class)
+    end.
+
+exception_class(#{class := Class}, _Report) when is_atom(Class) ->
+    Class;
+exception_class(_Meta, #{class := Class}) when is_atom(Class) ->
+    Class;
+exception_class(_Meta, #{exception_class := Class}) when is_atom(Class) ->
+    Class;
+exception_class(_Meta, _Report) ->
+    undefined.
+
+exception_value(Report, _Event) when map_size(Report) > 0 ->
+    Fields = [message, msg, reason],
+    case [maps:get(F, Report) || F <- Fields, is_map_key(F, Report)] of
+        [Message | _] -> format("~tkp", [Message]);
+        [] -> format("~tkp", [Report])
+    end;
+exception_value(_Report, #{logentry := #{formatted := Formatted}}) ->
+    Formatted;
+exception_value(_Report, _Event) ->
+    <<"unknown">>.
+
 maybe_mfa(E0, _Message, _Meta) ->
     E0.
 
@@ -326,10 +409,24 @@ frame({M, F, A, Opts}) ->
         _ when is_integer(A) -> ArgNum = A;
         _ when is_list(A) -> ArgNum = length(A)
     end,
-    F0 = #{function => format("~tp:~tp/~b", [M, F, ArgNum])},
+    F0 = #{
+        function => format("~tp:~tp/~b", [M, F, ArgNum]),
+        in_app => frame_in_app(lists:keyfind(file, 1, Opts))
+    },
     F1 = frame_extra(F0, lists:keyfind(file, 1, Opts)),
     F2 = frame_extra(F1, lists:keyfind(line, 1, Opts)),
     F2.
+
+frame_in_app({file, "/" ++ _ = File}) ->
+    % Rebar3 keeps dependency source trees under `_build`, so absolute paths
+    % that do not contain `_build` are treated as application code. Relative
+    % paths (OTP modules) and frames without file info are not.
+    case string:find(File, "/_build/") of
+        nomatch -> true;
+        _Match -> false
+    end;
+frame_in_app(_File) ->
+    false.
 
 frame_extra(F, {file, String}) ->
     F#{filename => unicode:characters_to_binary(String)};
