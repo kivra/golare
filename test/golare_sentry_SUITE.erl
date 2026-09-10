@@ -667,9 +667,14 @@ report_map_oversized_exception(_Config) ->
     } = Item,
     ct:pal(default, "type: ~p~nvalue: ~p", [Type, Value]),
     ?assertEqual(<<"{badmatch,{error,{fault,...}}}">>, Type),
-    ?assert(byte_size(Value) =< 4200),
-    ?assert(byte_size(Extra) =< 1100),
-    ?assert(byte_size(Formatted) =< 8300),
+    %% truncate/2 emits at most Limit characters plus a three character
+    %% marker, against the limits the handler defines for each field.
+    ?assert(string:length(Value) =< 4096 + 3),
+    ?assert(string:length(Extra) =< 1024 + 3),
+    ?assert(string:length(Formatted) =< 8192 + 3),
+    %% ...and the fields still carry the fault, rather than being gutted.
+    ?assert(string:length(Value) > 1000),
+    ?assert(string:length(Extra) > 1000),
     ok.
 
 latin1_string_log(_Config) ->
@@ -709,7 +714,8 @@ report_cb_ignoring_limits(_Config) ->
     {ok, EventId} = golare_logger_h:log(LogItem, #{}),
     {_, Item} = wait_for(EventId),
     #{<<"logentry">> := #{<<"formatted">> := Formatted}} = Item,
-    ?assert(byte_size(Formatted) =< 8300),
+    ?assert(string:length(Formatted) =< 8192 + 3),
+    ?assert(string:length(Formatted) > 8000),
     ?assertMatch(<<"payload: xxx", _/binary>>, Formatted),
     ok.
 
