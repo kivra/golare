@@ -75,6 +75,7 @@ groups() ->
             report_map_oversized_exception,
             latin1_string_log,
             report_cb_ignoring_limits,
+            report_map_binary_message,
             supervisor_crash,
             proc_lib_crash
         ]}
@@ -717,6 +718,30 @@ report_cb_ignoring_limits(_Config) ->
     ?assert(string:length(Formatted) =< 8192 + 3),
     ?assert(string:length(Formatted) > 8000),
     ?assertMatch(<<"payload: xxx", _/binary>>, Formatted),
+    ok.
+
+report_map_binary_message(_Config) ->
+    Trace = [{cashier_client, check, 1, [{file, "cashier_client.erl"}, {line, 1}]}],
+    %% A flat binary message has no nesting for the type's depth limit to
+    %% bound, and the depth would otherwise cut it at around 22 bytes.
+    Report = #{message => <<"Check call to cashier failed">>, tenant => <<"1234">>},
+    LogItem = #{level => error, meta => #{time => 0, stacktrace => Trace}, msg => {report, Report}},
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    ct:pal(default, "Captured:~n~p", [Item]),
+    ?assertMatch(
+        #{
+            <<"exception">> := #{
+                <<"values">> := [
+                    #{
+                        <<"type">> := <<"<<\"Check call to cashier failed\">>">>,
+                        <<"value">> := <<"<<\"Check call to cashier failed\">>">>
+                    }
+                ]
+            }
+        },
+        Item
+    ),
     ok.
 
 wait_for(EventId) ->

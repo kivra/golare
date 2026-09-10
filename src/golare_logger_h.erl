@@ -308,7 +308,7 @@ describe(E0, #{msg := {report, Report}, meta := Meta}) when is_list(Report) ->
 describe(E0, #{msg := {string, Raw}, meta := Meta}) ->
     E1 = E0#{
         logentry =>
-            #{formatted => to_binary(Raw)}
+            #{formatted => truncate(to_binary(Raw), ?MESSAGE_LIMIT)}
     },
     maybe_mfa(E1, Raw, Meta);
 describe(E0, #{msg := {FormatString, Params}, meta := Meta}) when is_list(Params) ->
@@ -410,6 +410,12 @@ exception_type(Report, Meta, Event) ->
             print(Class, ?TYPE_LIMIT)
     end.
 
+%% ~P's depth also governs how many bytes of a binary it prints, so a flat
+%% binary message would lose most of its text to a depth that is there to
+%% bound nesting. Such a message needs no depth limit, only the character
+%% one. Containers keep the depth, where it is doing real work.
+type_print(Term) when is_binary(Term) ->
+    print(Term, ?TYPE_LIMIT);
 type_print(Term) ->
     format("~0tkP", [Term, ?TYPE_DEPTH], ?TYPE_LIMIT).
 
@@ -512,9 +518,10 @@ latin1_to_binary(Chardata) ->
         {incomplete, Encoded, _Rest} -> Encoded
     end.
 
-%% chars_limit is a budget for the printed terms rather than a hard cap, and
-%% it does not apply to ~s at all, so cut whatever is left over. Slicing on
-%% characters keeps the result valid UTF-8 for the JSON encoder.
+%% chars_limit budgets the formatted values but not the literal text of the
+%% format string, so a result can still come back over the limit. Cut what is
+%% left over, slicing on characters to keep the result valid UTF-8 for the
+%% JSON encoder.
 truncate(Bin, Limit) when byte_size(Bin) =< Limit ->
     % A UTF-8 binary never holds more characters than bytes, so this settles
     % the common case without walking the string.
