@@ -17,7 +17,7 @@
 %% rather than leave the cut to Sentry on arrival.
 %% The type is the issue title in Sentry, so it is printed to a shallow depth
 %% rather than trimmed, keeping it short and free of per-event data.
--define(TYPE_DEPTH, 6).
+-define(TYPE_DEPTH, 10).
 -define(TYPE_LIMIT, 128).
 -define(VALUE_LIMIT, 4096).
 %% Relay budgets logentry.params as 2048 bytes for the whole array, while

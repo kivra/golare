@@ -633,14 +633,15 @@ report_map_nested_exception(_Config) ->
     {ok, EventId} = golare_logger_h:log(LogItem, #{}),
     {_, Item} = wait_for(EventId),
     ct:pal(default, "Captured:~n~p", [Item]),
-    %% The call arguments differ per request, so they must not reach the type
-    %% that Sentry titles and groups the issue by.
+    %% The call arguments differ per request, and exception.type is the one
+    %% event field Relay never scrubs, so the depth has to stop above them.
     ?assertMatch(
         #{
             <<"exception">> := #{
                 <<"values">> := [
                     #{
-                        <<"type">> := <<"{exit,{noproc,{gen_server,...}}}">>,
+                        <<"type">> :=
+                            <<"{exit,{noproc,{gen_server,call,[bankday_server,{...}]}}}">>,
                         <<"value">> := <<"{exit,is_authorized}">>
                     }
                 ]
@@ -669,7 +670,9 @@ report_map_oversized_exception(_Config) ->
         <<"logentry">> := #{<<"formatted">> := Formatted}
     } = Item,
     ct:pal(default, "type: ~p~nvalue: ~p", [Type, Value]),
-    ?assertEqual(<<"{badmatch,{error,{fault,...}}}">>, Type),
+    ?assertEqual(
+        <<"{badmatch,{error,{fault,<<\"SOAP-ENV:Ser\"...>>,<<\"SOAP-ENV\"...>>}}}">>, Type
+    ),
     %% truncate/2 emits at most Limit characters plus a three character
     %% marker, against the limits the handler defines for each field.
     ?assert(string:length(Value) =< 4096 + 3),
