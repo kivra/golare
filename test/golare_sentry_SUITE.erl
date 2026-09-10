@@ -74,6 +74,7 @@ groups() ->
             exception_type_is_one_line,
             exception_type_is_one_line_without_exception_key,
             format_log_type_is_one_line,
+            extra_keeps_its_wrapping,
             supervisor_crash,
             proc_lib_crash
         ]}
@@ -678,6 +679,30 @@ format_log_type_is_one_line(_Config) ->
     #{<<"exception">> := #{<<"values">> := [#{<<"type">> := Type}]}} = Item,
     ct:pal(default, "type: ~p", [Type]),
     ?assertEqual(nomatch, binary:match(Type, [<<"\n">>, <<"\r">>])),
+    ok.
+
+extra_keeps_its_wrapping(_Config) ->
+    Trace = [{conn_pool, checkout, 1, [{file, "conn_pool.erl"}, {line, 1}]}],
+    %% Only the type is a Slack link label. Additional Data renders as
+    %% preformatted text, and a process state is readable there precisely
+    %% because io_lib:print/1 wraps and indents it.
+    State = #{
+        pending => [
+            {req, N, <<"rest_company_offboard">>, {timeout, 30000}}
+         || N <- lists:seq(1, 8)
+        ],
+        backoff => #{attempts => 3, last_error => {error, {fault, <<"SOAP-ENV:Server">>}}}
+    },
+    Report = #{reason => {badmatch, false}, state => State},
+    LogItem = #{level => error, meta => #{time => 0, stacktrace => Trace}, msg => {report, Report}},
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{
+        <<"exception">> := #{<<"values">> := [#{<<"type">> := Type}]},
+        <<"extra">> := #{<<"state">> := Extra}
+    } = Item,
+    ?assertEqual(nomatch, binary:match(Type, [<<"\n">>, <<"\r">>])),
+    ?assertNotEqual(nomatch, binary:match(Extra, <<"\n">>)),
     ok.
 
 wait_for(EventId) ->

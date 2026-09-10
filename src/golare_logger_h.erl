@@ -204,7 +204,9 @@ describe(Event0, #{msg := {report, TopReport}, meta := #{report_cb := ReportFun}
                 exception => #{
                     values => [
                         #{
-                            type => print_list([Label, lists:keyfind(supervisor, 1, Info)]),
+                            type => print_oneline_list([
+                                Label, lists:keyfind(supervisor, 1, Info)
+                            ]),
                             value => print(lists:keyfind(reason, 1, Info))
                         }
                     ]
@@ -374,11 +376,11 @@ is_stackframe(_) ->
     false.
 
 exception_type(#{exception := Exception}, _Meta, _Event) ->
-    print(Exception);
+    print_oneline(Exception);
 exception_type(Report, Meta, Event) ->
     case exception_class(Meta, Report) of
         undefined -> oneline(exception_value(Report, Event));
-        Class -> print(Class)
+        Class -> print_oneline(Class)
     end.
 
 %% This fallback can reach an already-formatted message, which wraps at 80
@@ -452,11 +454,18 @@ format(Format, Args) ->
             print([format_error, Format, Args])
     end.
 
+print(Term) -> print_list([Term]).
+print_list(Terms) ->
+    Printed = [io_lib:print(T) || T <- Terms],
+    unicode:characters_to_binary(lists:join(" ", Printed)).
+
 %% Sentry renders the exception type as the label of a Slack link,
 %% <url|*type*>, and a newline there ends the link markup early, so the raw
 %% syntax shows instead of a bold title. io_lib:print/1 wraps at 80 columns;
-%% the 0 field width keeps the term on one line.
-print(Term) -> print_list([Term]).
-print_list(Terms) ->
+%% the 0 field width keeps the term on one line. Only the type needs this -
+%% extra, thread state and the message render as preformatted text, where
+%% the wrapping is what makes a process state readable.
+print_oneline(Term) -> print_oneline_list([Term]).
+print_oneline_list(Terms) ->
     Printed = [io_lib:format("~0tkp", [T]) || T <- Terms],
     unicode:characters_to_binary(lists:join(" ", Printed)).
