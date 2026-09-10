@@ -77,6 +77,7 @@ groups() ->
             report_cb_ignoring_limits,
             report_map_binary_message,
             format_log_params_budget,
+            format_log_multiline_type,
             supervisor_crash,
             proc_lib_crash
         ]}
@@ -762,6 +763,24 @@ format_log_params_budget(_Config) ->
     %% uselessness, and the array still says it was cut.
     ?assert(byte_size(hd(Reported)) > 1000),
     ?assertEqual(<<"...">>, lists:last(Reported)),
+    ok.
+
+format_log_multiline_type(_Config) ->
+    Trace = [{payment_icon, upload, 1, [{file, "payment_icon.erl"}, {line, 1}]}],
+    %% Sentry puts the type inside a Slack link label, where a newline ends
+    %% the markup and exposes the raw <url|*...*> syntax.
+    Format = "Failed to upload payment option icon~nReason: ~p",
+    LogItem = #{
+        level => error,
+        meta => #{time => 0, stacktrace => Trace},
+        msg => {Format, [timeout]}
+    },
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{<<"exception">> := #{<<"values">> := [#{<<"type">> := Type}]}} = Item,
+    ct:pal(default, "type: ~p", [Type]),
+    ?assertEqual(nomatch, binary:match(Type, [<<"\n">>, <<"\r">>])),
+    ?assertEqual(<<"Failed to upload payment option icon Reason: timeout">>, Type),
     ok.
 
 wait_for(EventId) ->
