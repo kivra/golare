@@ -515,6 +515,10 @@ latin1_to_binary(Chardata) ->
 %% chars_limit is a budget for the printed terms rather than a hard cap, and
 %% it does not apply to ~s at all, so cut whatever is left over. Slicing on
 %% characters keeps the result valid UTF-8 for the JSON encoder.
+truncate(Bin, Limit) when byte_size(Bin) =< Limit ->
+    % A UTF-8 binary never holds more characters than bytes, so this settles
+    % the common case without walking the string.
+    Bin;
 truncate(Bin, Limit) ->
     case string:length(Bin) > Limit of
         true -> <<(string:slice(Bin, 0, Limit))/binary, "..."/utf8>>;
