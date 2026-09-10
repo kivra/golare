@@ -418,12 +418,46 @@ oneline(Bin) ->
 
 %% ~P's depth also governs how many bytes of a binary it prints, so a flat
 %% binary message would lose most of its text to a depth that is there to
-%% bound nesting. Such a message needs no depth limit, only the character
-%% one. Containers keep the depth, where it is doing real work.
+%% bound nesting. Such a message is the text someone chose to log, so it
+%% needs no depth limit, only the character one.
 type_print(Term) when is_binary(Term) ->
     print(Term, ?TYPE_LIMIT);
 type_print(Term) ->
-    format("~0tkP", [Term, ?TYPE_DEPTH], ?TYPE_LIMIT).
+    format("~0tkP", [elide_binaries(Term), ?TYPE_DEPTH], ?TYPE_LIMIT).
+
+%% A binary inside a container is payload rather than a message: it holds the
+%% personnummer, address or SOAP body the failing call was given. No depth
+%% withholds it, because ~P prints roughly four bytes of a binary per level
+%% and the depth that shows the call shape also shows twenty bytes of every
+%% binary under it. Replace them instead, and leave the depth to the
+%% structure. Printable strings are left alone: ~P does not chop those, and
+%% they are as likely to be a message as a payload.
+elide_binaries(Term) ->
+    elide_binaries(Term, ?TYPE_DEPTH).
+
+elide_binaries(_Term, 0) ->
+    '...';
+elide_binaries(Bin, _Depth) when is_binary(Bin) ->
+    <<"...">>;
+elide_binaries(Tuple, Depth) when is_tuple(Tuple) ->
+    list_to_tuple([elide_binaries(E, Depth - 1) || E <- tuple_to_list(Tuple)]);
+elide_binaries(Map, Depth) when is_map(Map) ->
+    #{elide_binaries(K, Depth - 1) => elide_binaries(V, Depth - 1) || K := V <- Map};
+elide_binaries([_ | _] = List, Depth) ->
+    case io_lib:printable_list(List) of
+        true -> List;
+        false -> elide_list(List, Depth)
+    end;
+elide_binaries(Term, _Depth) ->
+    Term.
+
+%% Written out rather than a comprehension so an improper list survives.
+elide_list([H | T], Depth) ->
+    [elide_binaries(H, Depth - 1) | elide_list(T, Depth - 1)];
+elide_list([], _Depth) ->
+    [];
+elide_list(Tail, Depth) ->
+    elide_binaries(Tail, Depth).
 
 exception_class(#{class := Class}, _Report) when is_atom(Class) ->
     Class;

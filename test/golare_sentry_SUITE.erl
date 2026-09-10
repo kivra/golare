@@ -76,6 +76,7 @@ groups() ->
             latin1_string_log,
             report_cb_ignoring_limits,
             report_map_binary_message,
+            nested_binaries_are_elided,
             format_log_params_budget,
             format_log_multiline_type,
             supervisor_crash,
@@ -671,7 +672,7 @@ report_map_oversized_exception(_Config) ->
     } = Item,
     ct:pal(default, "type: ~p~nvalue: ~p", [Type, Value]),
     ?assertEqual(
-        <<"{badmatch,{error,{fault,<<\"SOAP-ENV:Ser\"...>>,<<\"SOAP-ENV\"...>>}}}">>, Type
+        <<"{badmatch,{error,{fault,<<\"...\">>,<<\"...\">>}}}">>, Type
     ),
     %% truncate/2 emits at most Limit characters plus a three character
     %% marker, against the limits the handler defines for each field.
@@ -784,6 +785,21 @@ format_log_multiline_type(_Config) ->
     ct:pal(default, "type: ~p", [Type]),
     ?assertEqual(nomatch, binary:match(Type, [<<"\n">>, <<"\r">>])),
     ?assertEqual(<<"Failed to upload payment option icon Reason: timeout">>, Type),
+    ok.
+
+nested_binaries_are_elided(_Config) ->
+    Trace = [{rest_user, lookup, 1, [{file, "rest_user.erl"}, {line, 1}]}],
+    %% exception.type is the one event field Relay never scrubs, and it is
+    %% the Slack alert's title, so a binary inside the term - which is where
+    %% a personnummer or an address ends up - must not reach it at any depth.
+    Report = #{exception => {badmatch, {error, <<"19850101-1234 not found">>}}},
+    LogItem = #{level => error, meta => #{time => 0, stacktrace => Trace}, msg => {report, Report}},
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{<<"exception">> := #{<<"values">> := [#{<<"type">> := Type}]}} = Item,
+    ct:pal(default, "type: ~p", [Type]),
+    ?assertEqual(<<"{badmatch,{error,<<\"...\">>}}">>, Type),
+    ?assertEqual(nomatch, binary:match(Type, <<"19850101">>)),
     ok.
 
 wait_for(EventId) ->
