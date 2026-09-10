@@ -78,6 +78,7 @@ groups() ->
             report_map_binary_message,
             nested_binaries_are_elided,
             binaries_behind_a_list_are_elided,
+            elision_cost_does_not_follow_the_term,
             format_log_params_budget,
             format_log_multiline_type,
             supervisor_crash,
@@ -818,6 +819,32 @@ binaries_behind_a_list_are_elided(_Config) ->
     ?assertEqual(nomatch, binary:match(Type, <<"19850101">>)),
     ?assert(byte_size(Type) =< 128 + 3),
     ok.
+
+elision_cost_does_not_follow_the_term(_Config) ->
+    %% The clamp is about work, not output: without it the traversal runs off
+    %% the end of the bound and walks the whole term, while producing exactly
+    %% the same title. So measure the cost of two reports that are identical
+    %% down to the elision depth and differ only far below it.
+    Shallow = nest_report(40),
+    Deep = nest_report(200000),
+    ShallowCost = log_reductions(Shallow),
+    DeepCost = log_reductions(Deep),
+    ct:pal(default, "shallow ~b reds, deep ~b reds", [ShallowCost, DeepCost]),
+    ?assert(DeepCost < 5 * ShallowCost),
+    ok.
+
+nest_report(Depth) ->
+    Nested = lists:foldl(fun(_, Acc) -> {nest, Acc} end, <<"19850101-1234">>, lists:seq(1, Depth)),
+    #{exception => {badmatch, [{k, Nested} || _ <- lists:seq(1, 15)]}}.
+
+log_reductions(Report) ->
+    Trace = [{rest_user, lookup, 1, [{file, "rest_user.erl"}, {line, 1}]}],
+    LogItem = #{level => error, meta => #{time => 0, stacktrace => Trace}, msg => {report, Report}},
+    {reductions, Before} = process_info(self(), reductions),
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {reductions, After} = process_info(self(), reductions),
+    {_, _} = wait_for(EventId),
+    After - Before.
 
 wait_for(EventId) ->
     receive
