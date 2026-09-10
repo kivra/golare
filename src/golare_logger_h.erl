@@ -533,10 +533,6 @@ params([P | Params], Left, Acc) ->
     Formatted = truncate_bytes(format("~tp", [P], Left), Left),
     params(Params, Left - byte_size(Formatted), [Formatted | Acc]).
 
-%% chars_limit budgets the formatted values but not the literal text of the
-%% format string, so a result can still come back over the limit. Cut what is
-%% left over, slicing on characters to keep the result valid UTF-8 for the
-%% JSON encoder.
 %% Cutting on a byte budget can land inside a character, so keep the part
 %% that decoded and drop the incomplete sequence at the end.
 truncate_bytes(Bin, Limit) when byte_size(Bin) =< Limit ->
@@ -549,6 +545,10 @@ truncate_bytes(Bin, Limit) ->
         {incomplete, Complete, _Rest} -> <<Complete/binary, "..."/utf8>>
     end.
 
+%% chars_limit budgets the formatted values but not the literal text of the
+%% format string, so a result can still come back over the limit. Cut what is
+%% left over, slicing on characters to keep the result valid UTF-8 for the
+%% JSON encoder.
 truncate(Bin, Limit) when byte_size(Bin) =< Limit ->
     % A UTF-8 binary never holds more characters than bytes, so this settles
     % the common case without walking the string.
