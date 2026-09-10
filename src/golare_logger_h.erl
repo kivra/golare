@@ -393,8 +393,8 @@ exception_class(_Meta, _Report) ->
 exception_value(Report, _Event) when map_size(Report) > 0 ->
     Fields = [message, msg, reason],
     case [maps:get(F, Report) || F <- Fields, is_map_key(F, Report)] of
-        [Message | _] -> format("~tkp", [Message]);
-        [] -> format("~tkp", [Report])
+        [Message | _] -> format("~0tkp", [Message]);
+        [] -> format("~0tkp", [Report])
     end;
 exception_value(_Report, #{logentry := #{formatted := Formatted}}) ->
     Formatted;
@@ -444,7 +444,11 @@ format(Format, Args) ->
             print([format_error, Format, Args])
     end.
 
+%% Sentry renders the exception type as the label of a Slack link,
+%% <url|*type*>, and a newline there ends the link markup early, so the raw
+%% syntax shows instead of a bold title. io_lib:print/1 wraps at 80 columns;
+%% the 0 field width keeps the term on one line.
 print(Term) -> print_list([Term]).
 print_list(Terms) ->
-    Printed = [io_lib:print(T) || T <- Terms],
+    Printed = [io_lib:format("~0tkp", [T]) || T <- Terms],
     unicode:characters_to_binary(lists:join(" ", Printed)).

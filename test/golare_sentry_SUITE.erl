@@ -71,6 +71,7 @@ groups() ->
             report_map_stacktrace_meta,
             report_map_stacktrace_in_report,
             format_log_stacktrace_meta,
+            exception_type_is_one_line,
             supervisor_crash,
             proc_lib_crash
         ]}
@@ -599,6 +600,36 @@ format_log_stacktrace_meta(_Config) ->
             }
         },
         Item
+    ),
+    ok.
+
+exception_type_is_one_line(_Config) ->
+    Trace = [
+        {bankday_server, bankdays_before, 2, [
+            {file, "/build/src/kivra_core/bankday_server.erl"}, {line, 27}
+        ]}
+    ],
+    %% Sentry puts the type in a Slack link label, <url|*type*>, where a
+    %% newline ends the markup and leaves the raw syntax showing.
+    Exception =
+        {exit,
+            {noproc,
+                {gen_server, call, [
+                    bankday_server, {bankdays_before, 0, <<"2026-10-01T00:00:00Z">>}
+                ]}}},
+    Report = #{reason => {exit, is_authorized}, exception => Exception},
+    LogItem = #{level => error, meta => #{time => 0, stacktrace => Trace}, msg => {report, Report}},
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{<<"exception">> := #{<<"values">> := [#{<<"type">> := Type}]}} = Item,
+    ct:pal(default, "type: ~p", [Type]),
+    ?assertEqual(nomatch, binary:match(Type, [<<"\n">>, <<"\r">>])),
+    ?assertEqual(
+        <<
+            "{exit,{noproc,{gen_server,call,[bankday_server,{bankdays_before,0,"
+            "<<\"2026-10-01T00:00:00Z\">>}]}}}"
+        >>,
+        Type
     ),
     ok.
 
