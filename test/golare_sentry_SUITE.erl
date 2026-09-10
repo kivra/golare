@@ -73,6 +73,7 @@ groups() ->
             format_log_stacktrace_meta,
             report_map_nested_exception,
             report_map_oversized_exception,
+            latin1_string_log,
             supervisor_crash,
             proc_lib_crash
         ]}
@@ -668,6 +669,30 @@ report_map_oversized_exception(_Config) ->
     ?assert(byte_size(Value) =< 4200),
     ?assert(byte_size(Extra) =< 1100),
     ?assert(byte_size(Formatted) =< 8300),
+    ok.
+
+latin1_string_log(_Config) ->
+    Trace = [{rest_content, get, 2, [{file, "rest_content.erl"}, {line, 1}]}],
+    %% Not valid UTF-8: unicode:characters_to_binary/1 answers with an error
+    %% tuple rather than raising, and that tuple used to reach the encoder.
+    Latin1 = <<"betalningsp", 229, "minnelse">>,
+    LogItem = #{
+        level => warning,
+        meta => #{time => 0, stacktrace => Trace},
+        msg => {string, Latin1}
+    },
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    ct:pal(default, "Captured:~n~p", [Item]),
+    ?assertMatch(
+        #{
+            <<"logentry">> := #{<<"formatted">> := <<"betalningsp\xc3\xa5minnelse">>},
+            <<"exception">> := #{
+                <<"values">> := [#{<<"value">> := <<"betalningsp\xc3\xa5minnelse">>}]
+            }
+        },
+        Item
+    ),
     ok.
 
 wait_for(EventId) ->

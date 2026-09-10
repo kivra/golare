@@ -10,14 +10,19 @@
 -export([filter_config/1]).
 -export([log/2]).
 
-%% Sentry trims long strings when it normalizes an event and rejects oversized
-%% envelopes outright, so terms are elided here instead of downstream: the
-%% Erlang formatter marks where it stopped with `...`, a byte cut does not.
+%% Nothing else bounds an event's size, and golare_transport holds up to
+%% max_queued of them, so a burst of crashes carrying large process states
+%% would put the reporting path itself under memory pressure. Elide terms
+%% here, where the Erlang formatter can mark where it stopped with `...`,
+%% rather than leave the cut to Sentry on arrival.
 %% The type is the issue title in Sentry, so it is printed to a shallow depth
 %% rather than trimmed, keeping it short and free of per-event data.
 -define(TYPE_DEPTH, 6).
 -define(TYPE_LIMIT, 128).
 -define(VALUE_LIMIT, 4096).
+%% Relay budgets logentry.params as 2048 bytes for the whole array, while
+%% extra gets 256kB, so the two cannot share one limit.
+-define(PARAM_LIMIT, 512).
 -define(EXTRA_LIMIT, 1024).
 -define(MESSAGE_LIMIT, 8192).
 -define(REPORT_DEPTH, 30).
@@ -155,8 +160,8 @@ describe(Event0, #{msg := {report, TopReport}, meta := #{report_cb := ReportFun}
             {FormatString, Params} = Fun(TopReport),
             LogEntry = #{
                 formatted => format(FormatString, Params),
-                message => unicode:characters_to_binary(FormatString),
-                params => [format("~tp", [P], ?EXTRA_LIMIT) || P <- Params]
+                message => to_binary(FormatString),
+                params => [format("~tp", [P], ?PARAM_LIMIT) || P <- Params]
             };
         Fun when is_function(Fun, 2) ->
             Config = #{
@@ -166,7 +171,7 @@ describe(Event0, #{msg := {report, TopReport}, meta := #{report_cb := ReportFun}
             },
             Formatted = Fun(TopReport, Config),
             LogEntry = #{
-                formatted => unicode:characters_to_binary(Formatted)
+                formatted => to_binary(Formatted)
             }
     end,
     Event1 = Event0#{
@@ -301,7 +306,7 @@ describe(E0, #{msg := {report, Report}, meta := Meta}) when is_list(Report) ->
 describe(E0, #{msg := {string, Raw}, meta := Meta}) ->
     E1 = E0#{
         logentry =>
-            #{formatted => unicode:characters_to_binary(Raw)}
+            #{formatted => to_binary(Raw)}
     },
     maybe_mfa(E1, Raw, Meta);
 describe(E0, #{msg := {FormatString, Params}, meta := Meta}) when is_list(Params) ->
@@ -309,8 +314,8 @@ describe(E0, #{msg := {FormatString, Params}, meta := Meta}) when is_list(Params
         logentry =>
             #{
                 formatted => format(FormatString, Params),
-                message => unicode:characters_to_binary(FormatString),
-                params => [format("~tp", [P], ?EXTRA_LIMIT) || P <- Params]
+                message => to_binary(FormatString),
+                params => [format("~tp", [P], ?PARAM_LIMIT) || P <- Params]
             }
     },
     maybe_mfa(E1, FormatString, Meta);
@@ -463,7 +468,7 @@ frame_in_app(_File) ->
     false.
 
 frame_extra(F, {file, String}) ->
-    F#{filename => unicode:characters_to_binary(String)};
+    F#{filename => to_binary(String)};
 frame_extra(F, {line, Line}) ->
     F#{lineno => Line};
 frame_extra(F, _) ->
@@ -475,7 +480,7 @@ format(Format, Args) ->
 format(Format, Args, Limit) ->
     try
         Msg = io_lib:format(Format, Args, [{chars_limit, Limit}]),
-        truncate(unicode:characters_to_binary(Msg), Limit)
+        truncate(to_binary(Msg), Limit)
     catch
         error:badarg ->
             print([format_error, Format, Args])
@@ -486,7 +491,24 @@ print(Term) -> print(Term, ?EXTRA_LIMIT).
 print(Term, Limit) -> format("~0tkp", [Term], Limit).
 
 print_list(Terms) ->
-    unicode:characters_to_binary(lists:join(" ", [print(T) || T <- Terms])).
+    to_binary(lists:join(" ", [print(T) || T <- Terms])).
+
+%% unicode:characters_to_binary/1 returns an error tuple instead of raising
+%% when a log message is not valid UTF-8, and that tuple would reach the JSON
+%% encoder. A latin-1 binary is the common case, so retry the conversion as
+%% latin-1 rather than dropping everything after the first invalid byte.
+to_binary(Chardata) ->
+    case unicode:characters_to_binary(Chardata) of
+        Bin when is_binary(Bin) -> Bin;
+        _NotUtf8 -> latin1_to_binary(Chardata)
+    end.
+
+latin1_to_binary(Chardata) ->
+    case unicode:characters_to_binary(Chardata, latin1, utf8) of
+        Bin when is_binary(Bin) -> Bin;
+        {error, Encoded, _Rest} -> Encoded;
+        {incomplete, Encoded, _Rest} -> Encoded
+    end.
 
 %% chars_limit is a budget for the printed terms rather than a hard cap, and
 %% it does not apply to ~s at all, so cut whatever is left over. Slicing on
