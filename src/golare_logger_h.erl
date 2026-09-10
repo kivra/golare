@@ -10,6 +10,18 @@
 -export([filter_config/1]).
 -export([log/2]).
 
+%% Sentry trims long strings when it normalizes an event and rejects oversized
+%% envelopes outright, so terms are elided here instead of downstream: the
+%% Erlang formatter marks where it stopped with `...`, a byte cut does not.
+%% The type is the issue title in Sentry, so it is printed to a shallow depth
+%% rather than trimmed, keeping it short and free of per-event data.
+-define(TYPE_DEPTH, 6).
+-define(TYPE_LIMIT, 128).
+-define(VALUE_LIMIT, 4096).
+-define(EXTRA_LIMIT, 1024).
+-define(MESSAGE_LIMIT, 8192).
+-define(REPORT_DEPTH, 30).
+
 %%% Handler management API
 
 add() ->
@@ -71,7 +83,7 @@ log(LogEvent, _Config) ->
             ExceptionValue0 =
                 #{
                     type => <<"golare sdk crash">>,
-                    value => format("~s:~tp", [Type, Rsn])
+                    value => format("~s:~tp", [Type, Rsn], ?VALUE_LIMIT)
                 },
             case [frame(T) || T <- Trace] of
                 [] ->
@@ -144,12 +156,12 @@ describe(Event0, #{msg := {report, TopReport}, meta := #{report_cb := ReportFun}
             LogEntry = #{
                 formatted => format(FormatString, Params),
                 message => unicode:characters_to_binary(FormatString),
-                params => [format("~tp", [P]) || P <- Params]
+                params => [format("~tp", [P], ?EXTRA_LIMIT) || P <- Params]
             };
         Fun when is_function(Fun, 2) ->
             Config = #{
-                depth => unlimited,
-                chars_limit => unlimited,
+                depth => ?REPORT_DEPTH,
+                chars_limit => ?MESSAGE_LIMIT,
                 single_line => false
             },
             Formatted = Fun(TopReport, Config),
@@ -298,7 +310,7 @@ describe(E0, #{msg := {FormatString, Params}, meta := Meta}) when is_list(Params
             #{
                 formatted => format(FormatString, Params),
                 message => unicode:characters_to_binary(FormatString),
-                params => [format("~tp", [P]) || P <- Params]
+                params => [format("~tp", [P], ?EXTRA_LIMIT) || P <- Params]
             }
     },
     maybe_mfa(E1, FormatString, Meta);
@@ -373,13 +385,26 @@ is_stackframe({M, F, A, Opts}) when is_atom(M), is_atom(F), is_list(Opts) ->
 is_stackframe(_) ->
     false.
 
+%% Sentry titles an issue after the exception type, and falls back to it when
+%% an event has no stacktrace to group on. Printing the reason term in full
+%% puts SOAP payloads, pids and gen_server call arguments in the title and
+%% splits one fault into an issue per variant, so the type is printed to a
+%% shallow depth. The full term stays in the exception value.
 exception_type(#{exception := Exception}, _Meta, _Event) ->
-    print(Exception);
+    type_print(Exception);
 exception_type(Report, Meta, Event) ->
     case exception_class(Meta, Report) of
-        undefined -> exception_value(Report, Event);
-        Class -> print(Class)
+        undefined ->
+            case report_message(Report) of
+                {ok, Message} -> type_print(Message);
+                error -> truncate(event_value(Event), ?TYPE_LIMIT)
+            end;
+        Class ->
+            print(Class, ?TYPE_LIMIT)
     end.
+
+type_print(Term) ->
+    format("~0tkP", [Term, ?TYPE_DEPTH], ?TYPE_LIMIT).
 
 exception_class(#{class := Class}, _Report) when is_atom(Class) ->
     Class;
@@ -390,15 +415,24 @@ exception_class(_Meta, #{exception_class := Class}) when is_atom(Class) ->
 exception_class(_Meta, _Report) ->
     undefined.
 
-exception_value(Report, _Event) when map_size(Report) > 0 ->
+exception_value(Report, Event) ->
+    case report_message(Report) of
+        {ok, Message} -> format("~0tkp", [Message], ?VALUE_LIMIT);
+        error -> event_value(Event)
+    end.
+
+report_message(Report) when map_size(Report) > 0 ->
     Fields = [message, msg, reason],
     case [maps:get(F, Report) || F <- Fields, is_map_key(F, Report)] of
-        [Message | _] -> format("~tkp", [Message]);
-        [] -> format("~tkp", [Report])
+        [Message | _] -> {ok, Message};
+        [] -> {ok, Report}
     end;
-exception_value(_Report, #{logentry := #{formatted := Formatted}}) ->
-    Formatted;
-exception_value(_Report, _Event) ->
+report_message(_Report) ->
+    error.
+
+event_value(#{logentry := #{formatted := Formatted}}) ->
+    truncate(Formatted, ?VALUE_LIMIT);
+event_value(_Event) ->
     <<"unknown">>.
 
 maybe_mfa(E0, _Message, _Meta) ->
@@ -436,15 +470,29 @@ frame_extra(F, _) ->
     F.
 
 format(Format, Args) ->
+    format(Format, Args, ?MESSAGE_LIMIT).
+
+format(Format, Args, Limit) ->
     try
-        Msg = io_lib:format(Format, Args),
-        unicode:characters_to_binary(Msg)
+        Msg = io_lib:format(Format, Args, [{chars_limit, Limit}]),
+        truncate(unicode:characters_to_binary(Msg), Limit)
     catch
         error:badarg ->
             print([format_error, Format, Args])
     end.
 
-print(Term) -> print_list([Term]).
+print(Term) -> print(Term, ?EXTRA_LIMIT).
+
+print(Term, Limit) -> format("~0tkp", [Term], Limit).
+
 print_list(Terms) ->
-    Printed = [io_lib:print(T) || T <- Terms],
-    unicode:characters_to_binary(lists:join(" ", Printed)).
+    unicode:characters_to_binary(lists:join(" ", [print(T) || T <- Terms])).
+
+%% chars_limit is a budget for the printed terms rather than a hard cap, and
+%% it does not apply to ~s at all, so cut whatever is left over. Slicing on
+%% characters keeps the result valid UTF-8 for the JSON encoder.
+truncate(Bin, Limit) ->
+    case string:length(Bin) > Limit of
+        true -> <<(string:slice(Bin, 0, Limit))/binary, "..."/utf8>>;
+        false -> Bin
+    end.

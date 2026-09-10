@@ -71,6 +71,8 @@ groups() ->
             report_map_stacktrace_meta,
             report_map_stacktrace_in_report,
             format_log_stacktrace_meta,
+            report_map_nested_exception,
+            report_map_oversized_exception,
             supervisor_crash,
             proc_lib_crash
         ]}
@@ -600,6 +602,72 @@ format_log_stacktrace_meta(_Config) ->
         },
         Item
     ),
+    ok.
+
+report_map_nested_exception(_Config) ->
+    Trace = [
+        {bankday_server, bankdays_before, 2, [
+            {file, "/build/src/kivra_core/bankday_server.erl"}, {line, 27}
+        ]},
+        {gen_server, call, 2, [{file, "gen_server.erl"}, {line, 1221}]}
+    ],
+    Exception =
+        {exit,
+            {noproc,
+                {gen_server, call, [
+                    bankday_server, {bankdays_before, 0, <<"2026-10-01T00:00:00Z">>}
+                ]}}},
+    Report = #{
+        reason => {exit, is_authorized},
+        exception => Exception,
+        resource => rest_company_offboard
+    },
+    LogItem = #{
+        level => warning, meta => #{time => 0, stacktrace => Trace}, msg => {report, Report}
+    },
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    ct:pal(default, "Captured:~n~p", [Item]),
+    %% The call arguments differ per request, so they must not reach the type
+    %% that Sentry titles and groups the issue by.
+    ?assertMatch(
+        #{
+            <<"exception">> := #{
+                <<"values">> := [
+                    #{
+                        <<"type">> := <<"{exit,{noproc,{gen_server,...}}}">>,
+                        <<"value">> := <<"{exit,is_authorized}">>
+                    }
+                ]
+            }
+        },
+        Item
+    ),
+    ok.
+
+report_map_oversized_exception(_Config) ->
+    Trace = [{rest_company_offboard, mm_status, 2, [{file, "rest.erl"}, {line, 1}]}],
+    Fault = binary:copy(<<"SOAP-ENV:Server fault. ">>, 1000),
+    Report = #{
+        reason => {error, {fault, <<"SOAP-ENV:Server">>, Fault}},
+        exception => {badmatch, {error, {fault, <<"SOAP-ENV:Server">>, Fault}}},
+        soap_response => Fault
+    },
+    LogItem = #{
+        level => warning, meta => #{time => 0, stacktrace => Trace}, msg => {report, Report}
+    },
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{
+        <<"exception">> := #{<<"values">> := [#{<<"type">> := Type, <<"value">> := Value}]},
+        <<"extra">> := #{<<"soap_response">> := Extra},
+        <<"logentry">> := #{<<"formatted">> := Formatted}
+    } = Item,
+    ct:pal(default, "type: ~p~nvalue: ~p", [Type, Value]),
+    ?assertEqual(<<"{badmatch,{error,{fault,...}}}">>, Type),
+    ?assert(byte_size(Value) =< 4200),
+    ?assert(byte_size(Extra) =< 1100),
+    ?assert(byte_size(Formatted) =< 8300),
     ok.
 
 wait_for(EventId) ->
