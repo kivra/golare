@@ -74,6 +74,7 @@ groups() ->
             report_map_nested_exception,
             report_map_oversized_exception,
             latin1_string_log,
+            report_cb_ignoring_limits,
             supervisor_crash,
             proc_lib_crash
         ]}
@@ -693,6 +694,23 @@ latin1_string_log(_Config) ->
         },
         Item
     ),
+    ok.
+
+report_cb_ignoring_limits(_Config) ->
+    %% The config handed to a report_cb/2 is advisory, and application code is
+    %% free to ignore chars_limit, as this one does.
+    ReportFun = fun(#{payload := Payload}, _Cfg) -> ["payload: ", Payload] end,
+    Report = #{payload => binary:copy(<<"x">>, 20000)},
+    LogItem = #{
+        level => error,
+        meta => #{time => 0, report_cb => ReportFun},
+        msg => {report, Report}
+    },
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{<<"logentry">> := #{<<"formatted">> := Formatted}} = Item,
+    ?assert(byte_size(Formatted) =< 8300),
+    ?assertMatch(<<"payload: xxx", _/binary>>, Formatted),
     ok.
 
 wait_for(EventId) ->

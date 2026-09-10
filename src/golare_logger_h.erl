@@ -169,9 +169,11 @@ describe(Event0, #{msg := {report, TopReport}, meta := #{report_cb := ReportFun}
                 chars_limit => ?MESSAGE_LIMIT,
                 single_line => false
             },
+            %% Config is advisory: report_cb/2 is application code and may
+            %% ignore depth and chars_limit, so cut the result regardless.
             Formatted = Fun(TopReport, Config),
             LogEntry = #{
-                formatted => to_binary(Formatted)
+                formatted => truncate(to_binary(Formatted), ?MESSAGE_LIMIT)
             }
     end,
     Event1 = Event0#{
