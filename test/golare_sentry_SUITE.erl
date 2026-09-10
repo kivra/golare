@@ -75,6 +75,7 @@ groups() ->
             exception_type_is_one_line_without_exception_key,
             format_log_type_is_one_line,
             extra_keeps_its_wrapping,
+            extra_keeps_utf8,
             supervisor_crash,
             proc_lib_crash
         ]}
@@ -703,6 +704,20 @@ extra_keeps_its_wrapping(_Config) ->
     } = Item,
     ?assertEqual(nomatch, binary:match(Type, [<<"\n">>, <<"\r">>])),
     ?assertNotEqual(nomatch, binary:match(Extra, <<"\n">>)),
+    ok.
+
+extra_keeps_utf8(_Config) ->
+    Trace = [{rest_user, lookup, 1, [{file, "rest_user.erl"}, {line, 1}]}],
+    %% io_lib:print/1 reads a binary as latin1, so <<"Malmö"/utf8>> arrives
+    %% double-encoded and a search for the name never finds the event.
+    Report = #{reason => {badmatch, false}, ort => <<"Malmö"/utf8>>},
+    LogItem = #{level => error, meta => #{time => 0, stacktrace => Trace}, msg => {report, Report}},
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{<<"extra">> := #{<<"ort">> := Extra}} = Item,
+    ct:pal(default, "ort: ~w", [Extra]),
+    ?assertNotEqual(nomatch, binary:match(Extra, <<"Malmö"/utf8>>)),
+    ?assertEqual(nomatch, binary:match(Extra, <<195, 131, 194, 182>>)),
     ok.
 
 wait_for(EventId) ->

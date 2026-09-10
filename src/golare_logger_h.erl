@@ -454,9 +454,13 @@ format(Format, Args) ->
             print([format_error, Format, Args])
     end.
 
+%% ~tp is io_lib:print/1 plus the t modifier: same unlimited depth and same
+%% 80-column wrapping, but it reads a binary as UTF-8 rather than latin1.
+%% Without it <<"Malmö"/utf8>> reaches Sentry double-encoded as MalmÃ¶, and
+%% a search for the name does not find the event.
 print(Term) -> print_list([Term]).
 print_list(Terms) ->
-    Printed = [io_lib:print(T) || T <- Terms],
+    Printed = [io_lib:format("~tp", [T]) || T <- Terms],
     unicode:characters_to_binary(lists:join(" ", Printed)).
 
 %% Sentry renders the exception type as the label of a Slack link,
