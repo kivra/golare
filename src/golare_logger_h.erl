@@ -431,11 +431,15 @@ type_print(Term) ->
 %% and the depth that shows the call shape also shows twenty bytes of every
 %% binary under it. Replace them instead, and leave the depth to the
 %% structure. Printable strings are left alone: ~P does not chop those, and
-%% they are as likely to be a message as a payload.
+%% they are as likely to be a message as a payload - which does leave a
+%% string payload printing where its binary form would not, a trade taken
+%% knowingly because payloads are binaries here.
 elide_binaries(Term) ->
     elide_binaries(Term, ?TYPE_DEPTH).
 
-elide_binaries(_Term, 0) ->
+elide_binaries(_Term, Depth) when Depth =< 0 ->
+    %% Deliberately stricter than ~P's own elision: the two count depth
+    %% slightly differently, and a binary must not survive the gap.
     '...';
 elide_binaries(Bin, _Depth) when is_binary(Bin) ->
     <<"...">>;
@@ -452,6 +456,8 @@ elide_binaries(Term, _Depth) ->
     Term.
 
 %% Written out rather than a comprehension so an improper list survives.
+elide_list(_List, Depth) when Depth =< 0 ->
+    '...';
 elide_list([H | T], Depth) ->
     [elide_binaries(H, Depth - 1) | elide_list(T, Depth - 1)];
 elide_list([], _Depth) ->

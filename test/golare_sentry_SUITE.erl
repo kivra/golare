@@ -77,6 +77,7 @@ groups() ->
             report_cb_ignoring_limits,
             report_map_binary_message,
             nested_binaries_are_elided,
+            binaries_behind_a_list_are_elided,
             format_log_params_budget,
             format_log_multiline_type,
             supervisor_crash,
@@ -800,6 +801,22 @@ nested_binaries_are_elided(_Config) ->
     ct:pal(default, "type: ~p", [Type]),
     ?assertEqual(<<"{badmatch,{error,<<\"...\">>}}">>, Type),
     ?assertEqual(nomatch, binary:match(Type, <<"19850101">>)),
+    ok.
+
+binaries_behind_a_list_are_elided(_Config) ->
+    Trace = [{rest_user, lookup, 1, [{file, "rest_user.erl"}, {line, 1}]}],
+    %% A list spends depth per element, so a container reached past one used
+    %% to escape the bound entirely - the traversal ran to the end of the
+    %% term, inside log/2, on a report shape as ordinary as a proplist.
+    Nested = lists:foldl(fun(_, Acc) -> {nest, Acc} end, <<"19850101-1234">>, lists:seq(1, 40)),
+    Report = #{exception => {badmatch, [{k, Nested} || _ <- lists:seq(1, 15)]}},
+    LogItem = #{level => error, meta => #{time => 0, stacktrace => Trace}, msg => {report, Report}},
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{<<"exception">> := #{<<"values">> := [#{<<"type">> := Type}]}} = Item,
+    ct:pal(default, "type: ~p", [Type]),
+    ?assertEqual(nomatch, binary:match(Type, <<"19850101">>)),
+    ?assert(byte_size(Type) =< 128 + 3),
     ok.
 
 wait_for(EventId) ->
