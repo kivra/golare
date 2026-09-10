@@ -22,7 +22,7 @@
 -define(VALUE_LIMIT, 4096).
 %% Relay budgets logentry.params as 2048 bytes for the whole array, while
 %% extra gets 256kB, so the two cannot share one limit.
--define(PARAM_LIMIT, 512).
+-define(PARAMS_BUDGET, 2048).
 -define(EXTRA_LIMIT, 1024).
 -define(MESSAGE_LIMIT, 8192).
 -define(REPORT_DEPTH, 30).
@@ -161,7 +161,7 @@ describe(Event0, #{msg := {report, TopReport}, meta := #{report_cb := ReportFun}
             LogEntry = #{
                 formatted => format(FormatString, Params),
                 message => to_binary(FormatString),
-                params => [format("~tp", [P], ?PARAM_LIMIT) || P <- Params]
+                params => params(Params)
             };
         Fun when is_function(Fun, 2) ->
             Config = #{
@@ -317,7 +317,7 @@ describe(E0, #{msg := {FormatString, Params}, meta := Meta}) when is_list(Params
             #{
                 formatted => format(FormatString, Params),
                 message => to_binary(FormatString),
-                params => [format("~tp", [P], ?PARAM_LIMIT) || P <- Params]
+                params => params(Params)
             }
     },
     maybe_mfa(E1, FormatString, Meta);
@@ -518,10 +518,37 @@ latin1_to_binary(Chardata) ->
         {incomplete, Encoded, _Rest} -> Encoded
     end.
 
+%% The params budget covers the whole array, so spend it across the list
+%% rather than per element, and count the bytes Relay counts rather than
+%% characters. What does not fit is dropped: logentry.formatted already
+%% carries the interpolated result.
+params(Params) ->
+    params(Params, ?PARAMS_BUDGET, []).
+
+params([], _Left, Acc) ->
+    lists:reverse(Acc);
+params([_ | _], Left, Acc) when Left =< 0 ->
+    lists:reverse([<<"...">> | Acc]);
+params([P | Params], Left, Acc) ->
+    Formatted = truncate_bytes(format("~tp", [P], Left), Left),
+    params(Params, Left - byte_size(Formatted), [Formatted | Acc]).
+
 %% chars_limit budgets the formatted values but not the literal text of the
 %% format string, so a result can still come back over the limit. Cut what is
 %% left over, slicing on characters to keep the result valid UTF-8 for the
 %% JSON encoder.
+%% Cutting on a byte budget can land inside a character, so keep the part
+%% that decoded and drop the incomplete sequence at the end.
+truncate_bytes(Bin, Limit) when byte_size(Bin) =< Limit ->
+    Bin;
+truncate_bytes(Bin, Limit) ->
+    Whole = binary:part(Bin, 0, Limit),
+    case unicode:characters_to_binary(Whole) of
+        Whole -> <<Whole/binary, "..."/utf8>>;
+        {error, Complete, _Rest} -> <<Complete/binary, "..."/utf8>>;
+        {incomplete, Complete, _Rest} -> <<Complete/binary, "..."/utf8>>
+    end.
+
 truncate(Bin, Limit) when byte_size(Bin) =< Limit ->
     % A UTF-8 binary never holds more characters than bytes, so this settles
     % the common case without walking the string.

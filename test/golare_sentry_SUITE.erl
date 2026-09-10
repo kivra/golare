@@ -76,6 +76,7 @@ groups() ->
             latin1_string_log,
             report_cb_ignoring_limits,
             report_map_binary_message,
+            format_log_params_budget,
             supervisor_crash,
             proc_lib_crash
         ]}
@@ -742,6 +743,25 @@ report_map_binary_message(_Config) ->
         },
         Item
     ),
+    ok.
+
+format_log_params_budget(_Config) ->
+    %% Relay budgets the whole params array at 2048 bytes, and non-ASCII text
+    %% spends two bytes per character, so both multipliers are exercised here.
+    Param = binary:copy(<<"p\xc3\xa5minnelse "/utf8>>, 200),
+    Params = lists:duplicate(8, Param),
+    Format = lists:flatten(lists:duplicate(8, "~ts ")),
+    LogItem = #{level => warning, meta => #{time => 0}, msg => {Format, Params}},
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{<<"logentry">> := #{<<"params">> := Reported}} = Item,
+    Total = lists:sum([byte_size(P) || P <- Reported]),
+    ct:pal(default, "~b params, ~b bytes total", [length(Reported), Total]),
+    ?assert(Total =< 2048 + 16),
+    %% The budget is spent on the first params rather than shared into
+    %% uselessness, and the array still says it was cut.
+    ?assert(byte_size(hd(Reported)) > 1000),
+    ?assertEqual(<<"...">>, lists:last(Reported)),
     ok.
 
 wait_for(EventId) ->
