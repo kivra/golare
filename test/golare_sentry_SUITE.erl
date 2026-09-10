@@ -72,6 +72,8 @@ groups() ->
             report_map_stacktrace_in_report,
             format_log_stacktrace_meta,
             exception_type_is_one_line,
+            exception_type_is_one_line_without_exception_key,
+            format_log_type_is_one_line,
             supervisor_crash,
             proc_lib_crash
         ]}
@@ -631,6 +633,51 @@ exception_type_is_one_line(_Config) ->
         >>,
         Type
     ),
+    ok.
+
+exception_type_is_one_line_without_exception_key(_Config) ->
+    Trace = [{rest_company_offboard, mm_status, 2, [{file, "rest.erl"}, {line, 1}]}],
+    %% No exception key, so the type comes from exception_value/2 rather than
+    %% print/1 - the common report shape, and the other half of this change.
+    Fault =
+        {badmatch,
+            {error,
+                {fault, <<"SOAP-ENV:Server">>,
+                    <<"Error in isAuthorizedSigner - ERROR CODE: [5018 BOLAGSVERKET_ERROR]">>}}},
+    LogItem = #{
+        level => warning,
+        meta => #{time => 0, stacktrace => Trace},
+        msg => {report, #{reason => Fault}}
+    },
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{<<"exception">> := #{<<"values">> := [#{<<"type">> := Type, <<"value">> := Value}]}} = Item,
+    ct:pal(default, "type: ~p~nvalue: ~p", [Type, Value]),
+    ?assertEqual(nomatch, binary:match(Type, [<<"\n">>, <<"\r">>])),
+    %% The value is the alert's second line, and exception_value/2 wrapped it
+    %% at 80 columns independently of the collapse applied to the type.
+    ?assertEqual(nomatch, binary:match(Value, [<<"\n">>, <<"\r">>])),
+    ok.
+
+format_log_type_is_one_line(_Config) ->
+    Trace = [{soap_client, call, 2, [{file, "soap_client.erl"}, {line, 1}]}],
+    %% The caller's own ~p wraps at 80 columns, and golare cannot change the
+    %% format string - only collapse the type built from the result.
+    Term =
+        {badmatch,
+            {error,
+                {fault, <<"SOAP-ENV:Server">>,
+                    <<"Error in isAuthorizedSigner - ERROR CODE: [5018 BOLAGSVERKET_ERROR]">>}}},
+    LogItem = #{
+        level => error,
+        meta => #{time => 0, stacktrace => Trace},
+        msg => {"soap call failed: ~p", [Term]}
+    },
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{<<"exception">> := #{<<"values">> := [#{<<"type">> := Type}]}} = Item,
+    ct:pal(default, "type: ~p", [Type]),
+    ?assertEqual(nomatch, binary:match(Type, [<<"\n">>, <<"\r">>])),
     ok.
 
 wait_for(EventId) ->

@@ -377,9 +377,17 @@ exception_type(#{exception := Exception}, _Meta, _Event) ->
     print(Exception);
 exception_type(Report, Meta, Event) ->
     case exception_class(Meta, Report) of
-        undefined -> exception_value(Report, Event);
+        undefined -> oneline(exception_value(Report, Event));
         Class -> print(Class)
     end.
+
+%% This fallback can reach an already-formatted message, which wraps at 80
+%% columns whether it came from a caller's own ~p in a format string or from
+%% golare's ~tkp for a report with non-atom keys. Neither is fixable at the
+%% producer - logentry.formatted may legitimately be multi-line - so collapse
+%% it here, where it becomes a Slack link label.
+oneline(Bin) ->
+    binary:replace(Bin, [<<"\n">>, <<"\r">>], <<" ">>, [global]).
 
 exception_class(#{class := Class}, _Report) when is_atom(Class) ->
     Class;
