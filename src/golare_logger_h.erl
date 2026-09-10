@@ -410,16 +410,16 @@ exception_type(Report, Meta, Event) ->
             print(Class, ?TYPE_LIMIT)
     end.
 
-%% ~P's depth also governs how many bytes of a binary it prints, so a flat
-%% binary message would lose most of its text to a depth that is there to
-%% bound nesting. Such a message needs no depth limit, only the character
-%% one. Containers keep the depth, where it is doing real work.
 %% Sentry renders the type as the label of a Slack link, <url|*type*>, and a
 %% newline there ends the link markup early and exposes the raw syntax. Terms
 %% cannot carry one - ~p escapes newlines - but a formatted message can.
 oneline(Bin) ->
     binary:replace(Bin, [<<"\n">>, <<"\r">>], <<" ">>, [global]).
 
+%% ~P's depth also governs how many bytes of a binary it prints, so a flat
+%% binary message would lose most of its text to a depth that is there to
+%% bound nesting. Such a message needs no depth limit, only the character
+%% one. Containers keep the depth, where it is doing real work.
 type_print(Term) when is_binary(Term) ->
     print(Term, ?TYPE_LIMIT);
 type_print(Term) ->
