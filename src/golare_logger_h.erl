@@ -383,11 +383,9 @@ exception_type(Report, Meta, Event) ->
         Class -> print_oneline(Class)
     end.
 
-%% This fallback can reach an already-formatted message, which wraps at 80
-%% columns whether it came from a caller's own ~p in a format string or from
-%% golare's ~tkp for a report with non-atom keys. Neither is fixable at the
-%% producer - logentry.formatted may legitimately be multi-line - so collapse
-%% it here, where it becomes a Slack link label.
+%% A formatted message may arrive already wrapped, and logentry.formatted is
+%% allowed to be, so collapse it here instead: this is where it becomes a
+%% link label.
 oneline(Bin) ->
     binary:replace(Bin, [<<"\n">>, <<"\r">>], <<" ">>, [global]).
 
@@ -454,24 +452,17 @@ format(Format, Args) ->
             print([format_error, Format, Args])
     end.
 
-%% Same unlimited depth and 80-column wrapping as io_lib:print/1, plus the
-%% two modifiers print_oneline_list/1 also uses. t reads a binary as UTF-8
-%% rather than latin1, without which <<"Malmö"/utf8>> reaches Sentry as
-%% MalmÃ¶ and a search for the name misses the event. k orders map keys,
-%% which a map over 32 keys does not do on its own - and this printer builds
-%% the last-resort logentry.formatted, which can become the type, so an
-%% unstable key order there would give one event two grouping hashes.
+%% io_lib:print/1 plus t, which reads binaries as UTF-8 rather than latin1,
+%% and k, which orders map keys - a map over 32 keys does not, and this
+%% output can reach the type, which Sentry groups on.
 print(Term) -> print_list([Term]).
 print_list(Terms) ->
     Printed = [io_lib:format("~tkp", [T]) || T <- Terms],
     unicode:characters_to_binary(lists:join(" ", Printed)).
 
-%% Sentry renders the exception type as the label of a Slack link,
-%% <url|*type*>, and a newline there ends the link markup early, so the raw
-%% syntax shows instead of a bold title. io_lib:print/1 wraps at 80 columns;
-%% the 0 field width keeps the term on one line. Only the type needs this -
-%% extra, thread state and the message render as preformatted text, where
-%% the wrapping is what makes a process state readable.
+%% Sentry renders the type as a Slack link label, <url|*type*>, where a
+%% newline ends the markup early. Only the type: extra and thread state are
+%% preformatted text, and the wrapping is what makes a state dump readable.
 print_oneline(Term) -> print_oneline_list([Term]).
 print_oneline_list(Terms) ->
     Printed = [io_lib:format("~0tkp", [T]) || T <- Terms],

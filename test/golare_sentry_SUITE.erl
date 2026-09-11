@@ -614,8 +614,7 @@ exception_type_is_one_line(_Config) ->
             {file, "/build/src/kivra_core/bankday_server.erl"}, {line, 27}
         ]}
     ],
-    %% Sentry puts the type in a Slack link label, <url|*type*>, where a
-    %% newline ends the markup and leaves the raw syntax showing.
+    %% A newline in the type ends Slack's link markup early.
     Exception =
         {exit,
             {noproc,
@@ -640,8 +639,7 @@ exception_type_is_one_line(_Config) ->
 
 exception_type_is_one_line_without_exception_key(_Config) ->
     Trace = [{rest_company_offboard, mm_status, 2, [{file, "rest.erl"}, {line, 1}]}],
-    %% No exception key, so the type comes from exception_value/2 rather than
-    %% print/1 - the common report shape, and the other half of this change.
+    %% No exception key, so the type comes from exception_value/2, not print/1.
     Fault =
         {badmatch,
             {error,
@@ -657,15 +655,13 @@ exception_type_is_one_line_without_exception_key(_Config) ->
     #{<<"exception">> := #{<<"values">> := [#{<<"type">> := Type, <<"value">> := Value}]}} = Item,
     ct:pal(default, "type: ~p~nvalue: ~p", [Type, Value]),
     ?assertEqual(nomatch, binary:match(Type, [<<"\n">>, <<"\r">>])),
-    %% The value is the alert's second line, and exception_value/2 wrapped it
-    %% at 80 columns independently of the collapse applied to the type.
+    %% The value is the alert's second line, wrapped independently of the type.
     ?assertEqual(nomatch, binary:match(Value, [<<"\n">>, <<"\r">>])),
     ok.
 
 format_log_type_is_one_line(_Config) ->
     Trace = [{soap_client, call, 2, [{file, "soap_client.erl"}, {line, 1}]}],
-    %% The caller's own ~p wraps at 80 columns, and golare cannot change the
-    %% format string - only collapse the type built from the result.
+    %% The caller's own ~p wraps, and golare cannot change the format string.
     Term =
         {badmatch,
             {error,
@@ -685,9 +681,8 @@ format_log_type_is_one_line(_Config) ->
 
 extra_keeps_its_wrapping(_Config) ->
     Trace = [{conn_pool, checkout, 1, [{file, "conn_pool.erl"}, {line, 1}]}],
-    %% Only the type is a Slack link label. Additional Data renders as
-    %% preformatted text, and a process state is readable there precisely
-    %% because io_lib:print/1 wraps and indents it.
+    %% Additional Data is preformatted text, where the wrapping is what makes
+    %% a state dump readable. Only the type may lose it.
     State = #{
         pending => [
             {req, N, <<"rest_company_offboard">>, {timeout, 30000}}
@@ -709,8 +704,7 @@ extra_keeps_its_wrapping(_Config) ->
 
 extra_keeps_utf8(_Config) ->
     Trace = [{rest_user, lookup, 1, [{file, "rest_user.erl"}, {line, 1}]}],
-    %% io_lib:print/1 reads a binary as latin1, so <<"Malmö"/utf8>> arrives
-    %% double-encoded and a search for the name never finds the event.
+    %% Read as latin1, <<"Malmö"/utf8>> arrives double-encoded as MalmÃ¶.
     Report = #{reason => {badmatch, false}, ort => <<"Malmö"/utf8>>},
     LogItem = #{level => error, meta => #{time => 0, stacktrace => Trace}, msg => {report, Report}},
     {ok, EventId} = golare_logger_h:log(LogItem, #{}),
@@ -723,10 +717,8 @@ extra_keeps_utf8(_Config) ->
 
 extra_orders_map_keys(_Config) ->
     Trace = [{conn_pool, checkout, 1, [{file, "conn_pool.erl"}, {line, 1}]}],
-    %% A map over 32 keys prints in internal hash order without the k
-    %% modifier. This printer also builds the last-resort formatted message,
-    %% which can become exception.type - a grouping contributor - so the
-    %% order has to be canonical rather than whatever the hash gives.
+    %% Over 32 keys a map prints in hash order without k, and this output can
+    %% reach the type, which Sentry groups on.
     Counters = maps:from_list([
         {list_to_atom("k" ++ integer_to_list(N)), N}
      || N <- lists:seq(1, 40)
