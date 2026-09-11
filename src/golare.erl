@@ -54,7 +54,7 @@ is_valid(level, Value) -> is_atom(Value).
 
 default(timestamp) -> erlang:system_time(second).
 
--spec capture_event(json:encode_value()) -> ok.
+-spec capture_event(Event :: map()) -> {ok, EventId :: uuid:uuid() | down | dropped}.
 capture_event(Event) ->
     ScopeFuns = persistent_term:get({golare, process_scope}, #{}),
     ScopeValues = #{K => F() || K := F <- ScopeFuns, is_function(F, 0)},
