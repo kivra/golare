@@ -454,13 +454,16 @@ format(Format, Args) ->
             print([format_error, Format, Args])
     end.
 
-%% ~tp is io_lib:print/1 plus the t modifier: same unlimited depth and same
-%% 80-column wrapping, but it reads a binary as UTF-8 rather than latin1.
-%% Without it <<"Malmö"/utf8>> reaches Sentry double-encoded as MalmÃ¶, and
-%% a search for the name does not find the event.
+%% Same unlimited depth and 80-column wrapping as io_lib:print/1, plus the
+%% two modifiers print_oneline_list/1 also uses. t reads a binary as UTF-8
+%% rather than latin1, without which <<"Malmö"/utf8>> reaches Sentry as
+%% MalmÃ¶ and a search for the name misses the event. k orders map keys,
+%% which a map over 32 keys does not do on its own - and this printer builds
+%% the last-resort logentry.formatted, which can become the type, so an
+%% unstable key order there would give one event two grouping hashes.
 print(Term) -> print_list([Term]).
 print_list(Terms) ->
-    Printed = [io_lib:format("~tp", [T]) || T <- Terms],
+    Printed = [io_lib:format("~tkp", [T]) || T <- Terms],
     unicode:characters_to_binary(lists:join(" ", Printed)).
 
 %% Sentry renders the exception type as the label of a Slack link,

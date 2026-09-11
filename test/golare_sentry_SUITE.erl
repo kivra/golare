@@ -76,6 +76,7 @@ groups() ->
             format_log_type_is_one_line,
             extra_keeps_its_wrapping,
             extra_keeps_utf8,
+            extra_orders_map_keys,
             supervisor_crash,
             proc_lib_crash
         ]}
@@ -718,6 +719,25 @@ extra_keeps_utf8(_Config) ->
     ct:pal(default, "ort: ~w", [Extra]),
     ?assertNotEqual(nomatch, binary:match(Extra, <<"Malmö"/utf8>>)),
     ?assertEqual(nomatch, binary:match(Extra, <<195, 131, 194, 182>>)),
+    ok.
+
+extra_orders_map_keys(_Config) ->
+    Trace = [{conn_pool, checkout, 1, [{file, "conn_pool.erl"}, {line, 1}]}],
+    %% A map over 32 keys prints in internal hash order without the k
+    %% modifier. This printer also builds the last-resort formatted message,
+    %% which can become exception.type - a grouping contributor - so the
+    %% order has to be canonical rather than whatever the hash gives.
+    Counters = maps:from_list([
+        {list_to_atom("k" ++ integer_to_list(N)), N}
+     || N <- lists:seq(1, 40)
+    ]),
+    Report = #{reason => {badmatch, false}, counters => Counters},
+    LogItem = #{level => error, meta => #{time => 0, stacktrace => Trace}, msg => {report, Report}},
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{<<"extra">> := #{<<"counters">> := Extra}} = Item,
+    ct:pal(default, "counters: ~ts", [Extra]),
+    ?assertMatch(<<"#{k1 => 1,k10 => 10,", _/binary>>, Extra),
     ok.
 
 wait_for(EventId) ->
