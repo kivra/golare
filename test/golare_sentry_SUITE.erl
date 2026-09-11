@@ -71,6 +71,16 @@ groups() ->
             report_map_stacktrace_meta,
             report_map_stacktrace_in_report,
             format_log_stacktrace_meta,
+            report_map_nested_exception,
+            report_map_oversized_exception,
+            latin1_string_log,
+            report_cb_ignoring_limits,
+            report_map_binary_message,
+            nested_binaries_are_elided,
+            binaries_behind_a_list_are_elided,
+            elision_cost_does_not_follow_the_term,
+            format_log_params_budget,
+            format_log_multiline_type,
             supervisor_crash,
             proc_lib_crash
         ]}
@@ -601,6 +611,243 @@ format_log_stacktrace_meta(_Config) ->
         Item
     ),
     ok.
+
+report_map_nested_exception(_Config) ->
+    Trace = [
+        {bankday_server, bankdays_before, 2, [
+            {file, "/build/src/kivra_core/bankday_server.erl"}, {line, 27}
+        ]},
+        {gen_server, call, 2, [{file, "gen_server.erl"}, {line, 1221}]}
+    ],
+    Exception =
+        {exit,
+            {noproc,
+                {gen_server, call, [
+                    bankday_server, {bankdays_before, 0, <<"2026-10-01T00:00:00Z">>}
+                ]}}},
+    Report = #{
+        reason => {exit, is_authorized},
+        exception => Exception,
+        resource => rest_company_offboard
+    },
+    LogItem = #{
+        level => warning, meta => #{time => 0, stacktrace => Trace}, msg => {report, Report}
+    },
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    ct:pal(default, "Captured:~n~p", [Item]),
+    %% The call arguments differ per request, and exception.type is the one
+    %% event field Relay never scrubs, so the depth has to stop above them.
+    ?assertMatch(
+        #{
+            <<"exception">> := #{
+                <<"values">> := [
+                    #{
+                        <<"type">> :=
+                            <<"{exit,{noproc,{gen_server,call,[bankday_server,{...}]}}}">>,
+                        <<"value">> := <<"{exit,is_authorized}">>
+                    }
+                ]
+            }
+        },
+        Item
+    ),
+    ok.
+
+report_map_oversized_exception(_Config) ->
+    Trace = [{rest_company_offboard, mm_status, 2, [{file, "rest.erl"}, {line, 1}]}],
+    Fault = binary:copy(<<"SOAP-ENV:Server fault. ">>, 1000),
+    Report = #{
+        reason => {error, {fault, <<"SOAP-ENV:Server">>, Fault}},
+        exception => {badmatch, {error, {fault, <<"SOAP-ENV:Server">>, Fault}}},
+        soap_response => Fault
+    },
+    LogItem = #{
+        level => warning, meta => #{time => 0, stacktrace => Trace}, msg => {report, Report}
+    },
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{
+        <<"exception">> := #{<<"values">> := [#{<<"type">> := Type, <<"value">> := Value}]},
+        <<"extra">> := #{<<"soap_response">> := Extra},
+        <<"logentry">> := #{<<"formatted">> := Formatted}
+    } = Item,
+    ct:pal(default, "type: ~p~nvalue: ~p", [Type, Value]),
+    ?assertEqual(
+        <<"{badmatch,{error,{fault,<<\"...\">>,<<\"...\">>}}}">>, Type
+    ),
+    %% truncate/2 emits at most Limit characters plus a three character
+    %% marker, against the limits the handler defines for each field.
+    ?assert(string:length(Value) =< 4096 + 3),
+    ?assert(string:length(Extra) =< 1024 + 3),
+    ?assert(string:length(Formatted) =< 8192 + 3),
+    %% ...and the fields still carry the fault, rather than being gutted.
+    ?assert(string:length(Value) > 1000),
+    ?assert(string:length(Extra) > 1000),
+    ok.
+
+latin1_string_log(_Config) ->
+    Trace = [{rest_content, get, 2, [{file, "rest_content.erl"}, {line, 1}]}],
+    %% Not valid UTF-8: unicode:characters_to_binary/1 answers with an error
+    %% tuple rather than raising, and that tuple used to reach the encoder.
+    Latin1 = <<"betalningsp", 229, "minnelse">>,
+    LogItem = #{
+        level => warning,
+        meta => #{time => 0, stacktrace => Trace},
+        msg => {string, Latin1}
+    },
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    ct:pal(default, "Captured:~n~p", [Item]),
+    ?assertMatch(
+        #{
+            <<"logentry">> := #{<<"formatted">> := <<"betalningsp\xc3\xa5minnelse">>},
+            <<"exception">> := #{
+                <<"values">> := [#{<<"value">> := <<"betalningsp\xc3\xa5minnelse">>}]
+            }
+        },
+        Item
+    ),
+    ok.
+
+report_cb_ignoring_limits(_Config) ->
+    %% The config handed to a report_cb/2 is advisory, and application code is
+    %% free to ignore chars_limit, as this one does.
+    ReportFun = fun(#{payload := Payload}, _Cfg) -> ["payload: ", Payload] end,
+    Report = #{payload => binary:copy(<<"x">>, 20000)},
+    LogItem = #{
+        level => error,
+        meta => #{time => 0, report_cb => ReportFun},
+        msg => {report, Report}
+    },
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{<<"logentry">> := #{<<"formatted">> := Formatted}} = Item,
+    ?assert(string:length(Formatted) =< 8192 + 3),
+    ?assert(string:length(Formatted) > 8000),
+    ?assertMatch(<<"payload: xxx", _/binary>>, Formatted),
+    ok.
+
+report_map_binary_message(_Config) ->
+    Trace = [{cashier_client, check, 1, [{file, "cashier_client.erl"}, {line, 1}]}],
+    %% A flat binary message has no nesting for the type's depth limit to
+    %% bound, and the depth would otherwise cut it at around 22 bytes.
+    Report = #{message => <<"Check call to cashier failed">>, tenant => <<"1234">>},
+    LogItem = #{level => error, meta => #{time => 0, stacktrace => Trace}, msg => {report, Report}},
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    ct:pal(default, "Captured:~n~p", [Item]),
+    ?assertMatch(
+        #{
+            <<"exception">> := #{
+                <<"values">> := [
+                    #{
+                        <<"type">> := <<"<<\"Check call to cashier failed\">>">>,
+                        <<"value">> := <<"<<\"Check call to cashier failed\">>">>
+                    }
+                ]
+            }
+        },
+        Item
+    ),
+    ok.
+
+format_log_params_budget(_Config) ->
+    %% Relay budgets the whole params array at 2048 bytes, and non-ASCII text
+    %% spends two bytes per character, so both multipliers are exercised here.
+    Param = binary:copy(<<"p\xc3\xa5minnelse "/utf8>>, 200),
+    Params = lists:duplicate(8, Param),
+    Format = lists:flatten(lists:duplicate(8, "~ts ")),
+    LogItem = #{level => warning, meta => #{time => 0}, msg => {Format, Params}},
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{<<"logentry">> := #{<<"params">> := Reported}} = Item,
+    Total = lists:sum([byte_size(P) || P <- Reported]),
+    ct:pal(default, "~b params, ~b bytes total", [length(Reported), Total]),
+    ?assert(Total =< 2048 + 16),
+    %% The budget is spent on the first params rather than shared into
+    %% uselessness, and the array still says it was cut.
+    ?assert(byte_size(hd(Reported)) > 1000),
+    ?assertEqual(<<"...">>, lists:last(Reported)),
+    ok.
+
+format_log_multiline_type(_Config) ->
+    Trace = [{payment_icon, upload, 1, [{file, "payment_icon.erl"}, {line, 1}]}],
+    %% Sentry puts the type inside a Slack link label, where a newline ends
+    %% the markup and exposes the raw <url|*...*> syntax.
+    Format = "Failed to upload payment option icon~nReason: ~p",
+    LogItem = #{
+        level => error,
+        meta => #{time => 0, stacktrace => Trace},
+        msg => {Format, [timeout]}
+    },
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{<<"exception">> := #{<<"values">> := [#{<<"type">> := Type}]}} = Item,
+    ct:pal(default, "type: ~p", [Type]),
+    ?assertEqual(nomatch, binary:match(Type, [<<"\n">>, <<"\r">>])),
+    ?assertEqual(<<"Failed to upload payment option icon Reason: timeout">>, Type),
+    ok.
+
+nested_binaries_are_elided(_Config) ->
+    Trace = [{rest_user, lookup, 1, [{file, "rest_user.erl"}, {line, 1}]}],
+    %% exception.type is the one event field Relay never scrubs, and it is
+    %% the Slack alert's title, so a binary inside the term - which is where
+    %% a personnummer or an address ends up - must not reach it at any depth.
+    Report = #{exception => {badmatch, {error, <<"19850101-1234 not found">>}}},
+    LogItem = #{level => error, meta => #{time => 0, stacktrace => Trace}, msg => {report, Report}},
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{<<"exception">> := #{<<"values">> := [#{<<"type">> := Type}]}} = Item,
+    ct:pal(default, "type: ~p", [Type]),
+    ?assertEqual(<<"{badmatch,{error,<<\"...\">>}}">>, Type),
+    ?assertEqual(nomatch, binary:match(Type, <<"19850101">>)),
+    ok.
+
+binaries_behind_a_list_are_elided(_Config) ->
+    Trace = [{rest_user, lookup, 1, [{file, "rest_user.erl"}, {line, 1}]}],
+    %% A list spends depth per element, so a container reached past one used
+    %% to escape the bound entirely - the traversal ran to the end of the
+    %% term, inside log/2, on a report shape as ordinary as a proplist.
+    Nested = lists:foldl(fun(_, Acc) -> {nest, Acc} end, <<"19850101-1234">>, lists:seq(1, 40)),
+    Report = #{exception => {badmatch, [{k, Nested} || _ <- lists:seq(1, 15)]}},
+    LogItem = #{level => error, meta => #{time => 0, stacktrace => Trace}, msg => {report, Report}},
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{<<"exception">> := #{<<"values">> := [#{<<"type">> := Type}]}} = Item,
+    ct:pal(default, "type: ~p", [Type]),
+    ?assertEqual(nomatch, binary:match(Type, <<"19850101">>)),
+    ?assert(byte_size(Type) =< 128 + 3),
+    ok.
+
+elision_cost_does_not_follow_the_term(_Config) ->
+    %% The clamp is about work, not output: without it the traversal runs off
+    %% the end of the bound and walks the whole term, while producing exactly
+    %% the same title. So measure the cost of two reports that are identical
+    %% down to the elision depth and differ only far below it.
+    Shallow = nest_report(40),
+    Deep = nest_report(200000),
+    ShallowCost = log_reductions(Shallow),
+    DeepCost = log_reductions(Deep),
+    ct:pal(default, "shallow ~b reds, deep ~b reds", [ShallowCost, DeepCost]),
+    %% Passes at about 2.3x, fails at about 37x. The gap narrows if
+    %% ?MESSAGE_LIMIT grows, since chars_limit bounds output rather than
+    %% traversal - a failure here may be that, not the clamp.
+    ?assert(DeepCost < 5 * ShallowCost),
+    ok.
+
+nest_report(Depth) ->
+    Nested = lists:foldl(fun(_, Acc) -> {nest, Acc} end, <<"19850101-1234">>, lists:seq(1, Depth)),
+    #{exception => {badmatch, [{k, Nested} || _ <- lists:seq(1, 15)]}}.
+
+log_reductions(Report) ->
+    Trace = [{rest_user, lookup, 1, [{file, "rest_user.erl"}, {line, 1}]}],
+    LogItem = #{level => error, meta => #{time => 0, stacktrace => Trace}, msg => {report, Report}},
+    {reductions, Before} = process_info(self(), reductions),
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {reductions, After} = process_info(self(), reductions),
+    {_, _} = wait_for(EventId),
+    After - Before.
 
 wait_for(EventId) ->
     receive

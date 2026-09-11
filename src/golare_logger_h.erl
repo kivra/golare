@@ -10,6 +10,23 @@
 -export([filter_config/1]).
 -export([log/2]).
 
+%% Nothing else bounds an event's size, and golare_transport holds up to
+%% max_queued of them, so a burst of crashes carrying large process states
+%% would put the reporting path itself under memory pressure. Elide terms
+%% here, where the Erlang formatter can mark where it stopped with `...`,
+%% rather than leave the cut to Sentry on arrival.
+%% The type is the issue title in Sentry, so it is printed to a shallow depth
+%% rather than trimmed, keeping it short and free of per-event data.
+-define(TYPE_DEPTH, 10).
+-define(TYPE_LIMIT, 128).
+-define(VALUE_LIMIT, 4096).
+%% Relay budgets logentry.params as 2048 bytes for the whole array, while
+%% extra gets 256kB, so the two cannot share one limit.
+-define(PARAMS_BUDGET, 2048).
+-define(EXTRA_LIMIT, 1024).
+-define(MESSAGE_LIMIT, 8192).
+-define(REPORT_DEPTH, 30).
+
 %%% Handler management API
 
 add() ->
@@ -71,7 +88,7 @@ log(LogEvent, _Config) ->
             ExceptionValue0 =
                 #{
                     type => <<"golare sdk crash">>,
-                    value => format("~s:~tp", [Type, Rsn])
+                    value => format("~s:~tp", [Type, Rsn], ?VALUE_LIMIT)
                 },
             case [frame(T) || T <- Trace] of
                 [] ->
@@ -143,18 +160,20 @@ describe(Event0, #{msg := {report, TopReport}, meta := #{report_cb := ReportFun}
             {FormatString, Params} = Fun(TopReport),
             LogEntry = #{
                 formatted => format(FormatString, Params),
-                message => unicode:characters_to_binary(FormatString),
-                params => [format("~tp", [P]) || P <- Params]
+                message => to_binary(FormatString),
+                params => params(Params)
             };
         Fun when is_function(Fun, 2) ->
             Config = #{
-                depth => unlimited,
-                chars_limit => unlimited,
+                depth => ?REPORT_DEPTH,
+                chars_limit => ?MESSAGE_LIMIT,
                 single_line => false
             },
+            %% Config is advisory: report_cb/2 is application code and may
+            %% ignore depth and chars_limit, so cut the result regardless.
             Formatted = Fun(TopReport, Config),
             LogEntry = #{
-                formatted => unicode:characters_to_binary(Formatted)
+                formatted => truncate(to_binary(Formatted), ?MESSAGE_LIMIT)
             }
     end,
     Event1 = Event0#{
@@ -289,7 +308,7 @@ describe(E0, #{msg := {report, Report}, meta := Meta}) when is_list(Report) ->
 describe(E0, #{msg := {string, Raw}, meta := Meta}) ->
     E1 = E0#{
         logentry =>
-            #{formatted => unicode:characters_to_binary(Raw)}
+            #{formatted => truncate(to_binary(Raw), ?MESSAGE_LIMIT)}
     },
     maybe_mfa(E1, Raw, Meta);
 describe(E0, #{msg := {FormatString, Params}, meta := Meta}) when is_list(Params) ->
@@ -297,8 +316,8 @@ describe(E0, #{msg := {FormatString, Params}, meta := Meta}) when is_list(Params
         logentry =>
             #{
                 formatted => format(FormatString, Params),
-                message => unicode:characters_to_binary(FormatString),
-                params => [format("~tp", [P]) || P <- Params]
+                message => to_binary(FormatString),
+                params => params(Params)
             }
     },
     maybe_mfa(E1, FormatString, Meta);
@@ -373,13 +392,78 @@ is_stackframe({M, F, A, Opts}) when is_atom(M), is_atom(F), is_list(Opts) ->
 is_stackframe(_) ->
     false.
 
+%% Sentry titles an issue after the exception type, and falls back to it when
+%% an event has no stacktrace to group on. Printing the reason term in full
+%% puts SOAP payloads, pids and gen_server call arguments in the title and
+%% splits one fault into an issue per variant, so the type is printed to a
+%% shallow depth. The full term stays in the exception value.
 exception_type(#{exception := Exception}, _Meta, _Event) ->
-    print(Exception);
+    type_print(Exception);
 exception_type(Report, Meta, Event) ->
     case exception_class(Meta, Report) of
-        undefined -> exception_value(Report, Event);
-        Class -> print(Class)
+        undefined ->
+            case report_message(Report) of
+                {ok, Message} -> type_print(Message);
+                error -> oneline(truncate(event_value(Event), ?TYPE_LIMIT))
+            end;
+        Class ->
+            print(Class, ?TYPE_LIMIT)
     end.
+
+%% Sentry renders the type as the label of a Slack link, <url|*type*>, and a
+%% newline there ends the link markup early and exposes the raw syntax. Terms
+%% cannot carry one - ~p escapes newlines - but a formatted message can.
+oneline(Bin) ->
+    binary:replace(Bin, [<<"\n">>, <<"\r">>], <<" ">>, [global]).
+
+%% ~P's depth also governs how many bytes of a binary it prints, so a flat
+%% binary message would lose most of its text to a depth that is there to
+%% bound nesting. Such a message is the text someone chose to log, so it
+%% needs no depth limit, only the character one.
+type_print(Term) when is_binary(Term) ->
+    print(Term, ?TYPE_LIMIT);
+type_print(Term) ->
+    format("~0tkP", [elide_binaries(Term), ?TYPE_DEPTH], ?TYPE_LIMIT).
+
+%% A binary inside a container is payload rather than a message: it holds the
+%% personnummer, address or SOAP body the failing call was given. No depth
+%% withholds it, because ~P prints roughly four bytes of a binary per level
+%% and the depth that shows the call shape also shows twenty bytes of every
+%% binary under it. Replace them instead, and leave the depth to the
+%% structure. Printable strings are left alone: ~P does not chop those, and
+%% they are as likely to be a message as a payload - which does leave a
+%% string payload printing where its binary form would not, a trade taken
+%% knowingly because payloads are binaries here.
+elide_binaries(Term) ->
+    elide_binaries(Term, ?TYPE_DEPTH).
+
+elide_binaries(_Term, Depth) when Depth =< 0 ->
+    %% Deliberately stricter than ~P's own elision: the two count depth
+    %% slightly differently, and a binary must not survive the gap.
+    '...';
+elide_binaries(Bin, _Depth) when is_binary(Bin) ->
+    <<"...">>;
+elide_binaries(Tuple, Depth) when is_tuple(Tuple) ->
+    list_to_tuple([elide_binaries(E, Depth - 1) || E <- tuple_to_list(Tuple)]);
+elide_binaries(Map, Depth) when is_map(Map) ->
+    #{elide_binaries(K, Depth - 1) => elide_binaries(V, Depth - 1) || K := V <- Map};
+elide_binaries([_ | _] = List, Depth) ->
+    case io_lib:printable_list(List) of
+        true -> List;
+        false -> elide_list(List, Depth)
+    end;
+elide_binaries(Term, _Depth) ->
+    Term.
+
+%% Written out rather than a comprehension so an improper list survives.
+elide_list(_List, Depth) when Depth =< 0 ->
+    '...';
+elide_list([H | T], Depth) ->
+    [elide_binaries(H, Depth - 1) | elide_list(T, Depth - 1)];
+elide_list([], _Depth) ->
+    [];
+elide_list(Tail, Depth) ->
+    elide_binaries(Tail, Depth).
 
 exception_class(#{class := Class}, _Report) when is_atom(Class) ->
     Class;
@@ -390,15 +474,24 @@ exception_class(_Meta, #{exception_class := Class}) when is_atom(Class) ->
 exception_class(_Meta, _Report) ->
     undefined.
 
-exception_value(Report, _Event) when map_size(Report) > 0 ->
+exception_value(Report, Event) ->
+    case report_message(Report) of
+        {ok, Message} -> format("~0tkp", [Message], ?VALUE_LIMIT);
+        error -> event_value(Event)
+    end.
+
+report_message(Report) when map_size(Report) > 0 ->
     Fields = [message, msg, reason],
     case [maps:get(F, Report) || F <- Fields, is_map_key(F, Report)] of
-        [Message | _] -> format("~tkp", [Message]);
-        [] -> format("~tkp", [Report])
+        [Message | _] -> {ok, Message};
+        [] -> {ok, Report}
     end;
-exception_value(_Report, #{logentry := #{formatted := Formatted}}) ->
-    Formatted;
-exception_value(_Report, _Event) ->
+report_message(_Report) ->
+    error.
+
+event_value(#{logentry := #{formatted := Formatted}}) ->
+    truncate(Formatted, ?VALUE_LIMIT);
+event_value(_Event) ->
     <<"unknown">>.
 
 maybe_mfa(E0, _Message, _Meta) ->
@@ -429,22 +522,85 @@ frame_in_app(_File) ->
     false.
 
 frame_extra(F, {file, String}) ->
-    F#{filename => unicode:characters_to_binary(String)};
+    F#{filename => to_binary(String)};
 frame_extra(F, {line, Line}) ->
     F#{lineno => Line};
 frame_extra(F, _) ->
     F.
 
 format(Format, Args) ->
+    format(Format, Args, ?MESSAGE_LIMIT).
+
+format(Format, Args, Limit) ->
     try
-        Msg = io_lib:format(Format, Args),
-        unicode:characters_to_binary(Msg)
+        Msg = io_lib:format(Format, Args, [{chars_limit, Limit}]),
+        truncate(to_binary(Msg), Limit)
     catch
         error:badarg ->
             print([format_error, Format, Args])
     end.
 
-print(Term) -> print_list([Term]).
+print(Term) -> print(Term, ?EXTRA_LIMIT).
+
+print(Term, Limit) -> format("~0tkp", [Term], Limit).
+
 print_list(Terms) ->
-    Printed = [io_lib:print(T) || T <- Terms],
-    unicode:characters_to_binary(lists:join(" ", Printed)).
+    to_binary(lists:join(" ", [print(T) || T <- Terms])).
+
+%% unicode:characters_to_binary/1 returns an error tuple instead of raising
+%% when a log message is not valid UTF-8, and that tuple would reach the JSON
+%% encoder. A latin-1 binary is the common case, so retry the conversion as
+%% latin-1 rather than dropping everything after the first invalid byte.
+to_binary(Chardata) ->
+    case unicode:characters_to_binary(Chardata) of
+        Bin when is_binary(Bin) -> Bin;
+        _NotUtf8 -> latin1_to_binary(Chardata)
+    end.
+
+latin1_to_binary(Chardata) ->
+    case unicode:characters_to_binary(Chardata, latin1, utf8) of
+        Bin when is_binary(Bin) -> Bin;
+        {error, Encoded, _Rest} -> Encoded;
+        {incomplete, Encoded, _Rest} -> Encoded
+    end.
+
+%% The params budget covers the whole array, so spend it across the list
+%% rather than per element, and count the bytes Relay counts rather than
+%% characters. What does not fit is dropped: logentry.formatted already
+%% carries the interpolated result.
+params(Params) ->
+    params(Params, ?PARAMS_BUDGET, []).
+
+params([], _Left, Acc) ->
+    lists:reverse(Acc);
+params([_ | _], Left, Acc) when Left =< 0 ->
+    lists:reverse([<<"...">> | Acc]);
+params([P | Params], Left, Acc) ->
+    Formatted = truncate_bytes(format("~tp", [P], Left), Left),
+    params(Params, Left - byte_size(Formatted), [Formatted | Acc]).
+
+%% Cutting on a byte budget can land inside a character, so keep the part
+%% that decoded and drop the incomplete sequence at the end.
+truncate_bytes(Bin, Limit) when byte_size(Bin) =< Limit ->
+    Bin;
+truncate_bytes(Bin, Limit) ->
+    Whole = binary:part(Bin, 0, Limit),
+    case unicode:characters_to_binary(Whole) of
+        Whole -> <<Whole/binary, "..."/utf8>>;
+        {error, Complete, _Rest} -> <<Complete/binary, "..."/utf8>>;
+        {incomplete, Complete, _Rest} -> <<Complete/binary, "..."/utf8>>
+    end.
+
+%% chars_limit budgets the formatted values but not the literal text of the
+%% format string, so a result can still come back over the limit. Cut what is
+%% left over, slicing on characters to keep the result valid UTF-8 for the
+%% JSON encoder.
+truncate(Bin, Limit) when byte_size(Bin) =< Limit ->
+    % A UTF-8 binary never holds more characters than bytes, so this settles
+    % the common case without walking the string.
+    Bin;
+truncate(Bin, Limit) ->
+    case string:length(Bin) > Limit of
+        true -> <<(string:slice(Bin, 0, Limit))/binary, "..."/utf8>>;
+        false -> Bin
+    end.
