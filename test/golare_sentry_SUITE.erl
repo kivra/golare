@@ -71,6 +71,12 @@ groups() ->
             report_map_stacktrace_meta,
             report_map_stacktrace_in_report,
             format_log_stacktrace_meta,
+            exception_type_is_one_line,
+            exception_type_is_one_line_without_exception_key,
+            format_log_type_is_one_line,
+            extra_keeps_its_wrapping,
+            extra_keeps_utf8,
+            extra_orders_map_keys,
             supervisor_crash,
             proc_lib_crash
         ]}
@@ -600,6 +606,130 @@ format_log_stacktrace_meta(_Config) ->
         },
         Item
     ),
+    ok.
+
+exception_type_is_one_line(_Config) ->
+    Trace = [
+        {bankday_server, bankdays_before, 2, [
+            {file, "/build/src/kivra_core/bankday_server.erl"}, {line, 27}
+        ]}
+    ],
+    %% A newline in the type ends Slack's link markup early.
+    Exception =
+        {exit,
+            {noproc,
+                {gen_server, call, [
+                    bankday_server, {bankdays_before, 0, <<"2026-10-01T00:00:00Z">>}
+                ]}}},
+    Report = #{reason => {exit, is_authorized}, exception => Exception},
+    LogItem = #{level => error, meta => #{time => 0, stacktrace => Trace}, msg => {report, Report}},
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{<<"exception">> := #{<<"values">> := [#{<<"type">> := Type}]}} = Item,
+    ct:pal(default, "type: ~p", [Type]),
+    ?assertEqual(nomatch, binary:match(Type, [<<"\n">>, <<"\r">>])),
+    ?assertEqual(
+        <<
+            "{exit,{noproc,{gen_server,call,[bankday_server,{bankdays_before,0,"
+            "<<\"2026-10-01T00:00:00Z\">>}]}}}"
+        >>,
+        Type
+    ),
+    ok.
+
+exception_type_is_one_line_without_exception_key(_Config) ->
+    Trace = [{rest_company_offboard, mm_status, 2, [{file, "rest.erl"}, {line, 1}]}],
+    %% No exception key, so the type comes from exception_value/2, not print/1.
+    Fault =
+        {badmatch,
+            {error,
+                {fault, <<"SOAP-ENV:Server">>,
+                    <<"Error in isAuthorizedSigner - ERROR CODE: [5018 BOLAGSVERKET_ERROR]">>}}},
+    LogItem = #{
+        level => warning,
+        meta => #{time => 0, stacktrace => Trace},
+        msg => {report, #{reason => Fault}}
+    },
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{<<"exception">> := #{<<"values">> := [#{<<"type">> := Type, <<"value">> := Value}]}} = Item,
+    ct:pal(default, "type: ~p~nvalue: ~p", [Type, Value]),
+    ?assertEqual(nomatch, binary:match(Type, [<<"\n">>, <<"\r">>])),
+    %% The value is the alert's second line, wrapped independently of the type.
+    ?assertEqual(nomatch, binary:match(Value, [<<"\n">>, <<"\r">>])),
+    ok.
+
+format_log_type_is_one_line(_Config) ->
+    Trace = [{soap_client, call, 2, [{file, "soap_client.erl"}, {line, 1}]}],
+    %% The caller's own ~p wraps, and golare cannot change the format string.
+    Term =
+        {badmatch,
+            {error,
+                {fault, <<"SOAP-ENV:Server">>,
+                    <<"Error in isAuthorizedSigner - ERROR CODE: [5018 BOLAGSVERKET_ERROR]">>}}},
+    LogItem = #{
+        level => error,
+        meta => #{time => 0, stacktrace => Trace},
+        msg => {"soap call failed: ~p", [Term]}
+    },
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{<<"exception">> := #{<<"values">> := [#{<<"type">> := Type}]}} = Item,
+    ct:pal(default, "type: ~p", [Type]),
+    ?assertEqual(nomatch, binary:match(Type, [<<"\n">>, <<"\r">>])),
+    ok.
+
+extra_keeps_its_wrapping(_Config) ->
+    Trace = [{conn_pool, checkout, 1, [{file, "conn_pool.erl"}, {line, 1}]}],
+    %% Additional Data is preformatted text, where the wrapping is what makes
+    %% a state dump readable. Only the type may lose it.
+    State = #{
+        pending => [
+            {req, N, <<"rest_company_offboard">>, {timeout, 30000}}
+         || N <- lists:seq(1, 8)
+        ],
+        backoff => #{attempts => 3, last_error => {error, {fault, <<"SOAP-ENV:Server">>}}}
+    },
+    Report = #{reason => {badmatch, false}, state => State},
+    LogItem = #{level => error, meta => #{time => 0, stacktrace => Trace}, msg => {report, Report}},
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{
+        <<"exception">> := #{<<"values">> := [#{<<"type">> := Type}]},
+        <<"extra">> := #{<<"state">> := Extra}
+    } = Item,
+    ?assertEqual(nomatch, binary:match(Type, [<<"\n">>, <<"\r">>])),
+    ?assertNotEqual(nomatch, binary:match(Extra, <<"\n">>)),
+    ok.
+
+extra_keeps_utf8(_Config) ->
+    Trace = [{rest_user, lookup, 1, [{file, "rest_user.erl"}, {line, 1}]}],
+    %% Read as latin1, <<"Malmö"/utf8>> arrives double-encoded as MalmÃ¶.
+    Report = #{reason => {badmatch, false}, ort => <<"Malmö"/utf8>>},
+    LogItem = #{level => error, meta => #{time => 0, stacktrace => Trace}, msg => {report, Report}},
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{<<"extra">> := #{<<"ort">> := Extra}} = Item,
+    ct:pal(default, "ort: ~w", [Extra]),
+    ?assertNotEqual(nomatch, binary:match(Extra, <<"Malmö"/utf8>>)),
+    ?assertEqual(nomatch, binary:match(Extra, <<195, 131, 194, 182>>)),
+    ok.
+
+extra_orders_map_keys(_Config) ->
+    Trace = [{conn_pool, checkout, 1, [{file, "conn_pool.erl"}, {line, 1}]}],
+    %% Over 32 keys a map prints in hash order without k, and this output can
+    %% reach the type, which Sentry groups on.
+    Counters = maps:from_list([
+        {list_to_atom("k" ++ integer_to_list(N)), N}
+     || N <- lists:seq(1, 40)
+    ]),
+    Report = #{reason => {badmatch, false}, counters => Counters},
+    LogItem = #{level => error, meta => #{time => 0, stacktrace => Trace}, msg => {report, Report}},
+    {ok, EventId} = golare_logger_h:log(LogItem, #{}),
+    {_, Item} = wait_for(EventId),
+    #{<<"extra">> := #{<<"counters">> := Extra}} = Item,
+    ct:pal(default, "counters: ~ts", [Extra]),
+    ?assertMatch(<<"#{k1 => 1,k10 => 10,", _/binary>>, Extra),
     ok.
 
 wait_for(EventId) ->

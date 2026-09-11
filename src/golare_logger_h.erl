@@ -204,7 +204,9 @@ describe(Event0, #{msg := {report, TopReport}, meta := #{report_cb := ReportFun}
                 exception => #{
                     values => [
                         #{
-                            type => print_list([Label, lists:keyfind(supervisor, 1, Info)]),
+                            type => print_oneline_list([
+                                Label, lists:keyfind(supervisor, 1, Info)
+                            ]),
                             value => print(lists:keyfind(reason, 1, Info))
                         }
                     ]
@@ -374,12 +376,18 @@ is_stackframe(_) ->
     false.
 
 exception_type(#{exception := Exception}, _Meta, _Event) ->
-    print(Exception);
+    print_oneline(Exception);
 exception_type(Report, Meta, Event) ->
     case exception_class(Meta, Report) of
-        undefined -> exception_value(Report, Event);
-        Class -> print(Class)
+        undefined -> oneline(exception_value(Report, Event));
+        Class -> print_oneline(Class)
     end.
+
+%% A formatted message may arrive already wrapped, and logentry.formatted is
+%% allowed to be, so collapse it here instead: this is where it becomes a
+%% link label.
+oneline(Bin) ->
+    binary:replace(Bin, [<<"\n">>, <<"\r">>], <<" ">>, [global]).
 
 exception_class(#{class := Class}, _Report) when is_atom(Class) ->
     Class;
@@ -393,8 +401,8 @@ exception_class(_Meta, _Report) ->
 exception_value(Report, _Event) when map_size(Report) > 0 ->
     Fields = [message, msg, reason],
     case [maps:get(F, Report) || F <- Fields, is_map_key(F, Report)] of
-        [Message | _] -> format("~tkp", [Message]);
-        [] -> format("~tkp", [Report])
+        [Message | _] -> format("~0tkp", [Message]);
+        [] -> format("~0tkp", [Report])
     end;
 exception_value(_Report, #{logentry := #{formatted := Formatted}}) ->
     Formatted;
@@ -444,7 +452,18 @@ format(Format, Args) ->
             print([format_error, Format, Args])
     end.
 
+%% io_lib:print/1 plus t, which reads binaries as UTF-8 rather than latin1,
+%% and k, which orders map keys - a map over 32 keys does not, and this
+%% output can reach the type, which Sentry groups on.
 print(Term) -> print_list([Term]).
 print_list(Terms) ->
-    Printed = [io_lib:print(T) || T <- Terms],
+    Printed = [io_lib:format("~tkp", [T]) || T <- Terms],
+    unicode:characters_to_binary(lists:join(" ", Printed)).
+
+%% Sentry renders the type as a Slack link label, <url|*type*>, where a
+%% newline ends the markup early. Only the type: extra and thread state are
+%% preformatted text, and the wrapping is what makes a state dump readable.
+print_oneline(Term) -> print_oneline_list([Term]).
+print_oneline_list(Terms) ->
+    Printed = [io_lib:format("~0tkp", [T]) || T <- Terms],
     unicode:characters_to_binary(lists:join(" ", Printed)).
