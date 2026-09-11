@@ -405,9 +405,7 @@ exception_value(Report, _Event) when map_size(Report) > 0 ->
         [] -> format("~0tkp", [Report])
     end;
 exception_value(_Report, #{logentry := #{formatted := Formatted}}) ->
-    Formatted;
-exception_value(_Report, _Event) ->
-    <<"unknown">>.
+    Formatted.
 
 maybe_mfa(E0, _Message, _Meta) ->
     E0.
