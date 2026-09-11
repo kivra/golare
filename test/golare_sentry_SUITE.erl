@@ -830,6 +830,9 @@ elision_cost_does_not_follow_the_term(_Config) ->
     ShallowCost = log_reductions(Shallow),
     DeepCost = log_reductions(Deep),
     ct:pal(default, "shallow ~b reds, deep ~b reds", [ShallowCost, DeepCost]),
+    %% Passes at about 2.3x, fails at about 37x. The gap narrows if
+    %% ?MESSAGE_LIMIT grows, since chars_limit bounds output rather than
+    %% traversal - a failure here may be that, not the clamp.
     ?assert(DeepCost < 5 * ShallowCost),
     ok.
 
