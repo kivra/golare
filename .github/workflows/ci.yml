@@ -1,0 +1,120 @@
+---
+name: ci
+
+permissions:
+  contents: read
+
+on:
+  # for feature branches
+  pull_request:
+  # for releases
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ (github.ref != 'refs/heads/main') && format('{0}-{1}', github.ref, github.workflow) || github.run_id }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  ci:
+    name: ci (OTP ${{ matrix.otp-version }})
+    runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # minimum_otp_vsn in rebar.config, and every release since
+        otp-version: ["27", "28", "29"]
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # the app vsn is derived from git tags, so we need the whole history
+          fetch-depth: 0
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: ${{ matrix.otp-version }}
+          rebar3-version: 3.26.0
+
+      - name: Cache the dialyzer PLT 🗄️
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: _build/dialyzer/*_plt*
+          key: plt-${{ runner.os }}-otp${{ matrix.otp-version }}-${{ hashFiles('rebar.config') }}
+          restore-keys: plt-${{ runner.os }}-otp${{ matrix.otp-version }}-
+
+      - name: Run the CI suite 🏃🏾
+        run: make ci
+
+  # Renovate bumps rebar.config; the committed lock has to follow. Pushing it
+  # from here cannot re-trigger CI, so the test matrix above has to be read as
+  # the verdict on the bump itself.
+  rebar-lock:
+    needs: [ci]
+    if: startsWith(github.head_ref, 'renovate/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          # check out the branch itself, not the merge commit, so we can push
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: "29"
+          rebar3-version: 3.26.0
+
+      - name: Update rebar.lock 🔒
+        run: |
+          ORIGIN="origin/${{ github.event.repository.default_branch }}"
+          if git diff --quiet --exit-code "${ORIGIN}"..HEAD -- rebar.config; then
+            echo "ℹ️ rebar.config untouched, nothing to do."
+            exit 0
+          fi
+
+          rebar3 upgrade --all
+
+          if git diff --quiet --exit-code rebar.lock; then
+            echo "ℹ️ rebar.lock already up to date."
+            exit 0
+          fi
+
+          git config user.name "Renovate Bot"
+          git config user.email "bot@renovateapp.com"
+          git add rebar.lock
+          git commit -m "auto-update(deps): Changes in rebar.lock"
+          git push origin HEAD:"${HEAD_REF}"
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+
+  release:
+    needs: [ci]
+    if: github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'no-release') == false
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump version and push tag
+        id: tag-version
+        uses: mathieudutour/github-tag-action@a22cf08638b34d5badda920f9daf6e72c477b07b # v6.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          dry_run: true
+          release_branches: main
+
+      - name: Create a GitHub release
+        run: gh release create "${NEW_TAG}" --generate-notes --latest
+        env:
+          NEW_TAG: ${{ steps.tag-version.outputs.new_tag }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
