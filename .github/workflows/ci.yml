@@ -79,6 +79,12 @@ jobs:
 
       - name: Update rebar.lock 🔒
         run: |
+          # Three dots: what the branch itself changed, not how it differs
+          # from main's tip. Note that the safety here rests on the second
+          # guard below -- this first one only decides whether to spend a
+          # `rebar3 upgrade --all`, so a variant that pushed or failed right
+          # here would misfire on a branch behind a base that touched
+          # rebar.config.
           ORIGIN="origin/${{ github.event.repository.default_branch }}"
           if git diff --quiet --exit-code "${ORIGIN}"...HEAD -- rebar.config; then
             echo "ℹ️ rebar.config untouched, nothing to do."
