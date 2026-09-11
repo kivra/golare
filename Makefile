@@ -10,7 +10,6 @@ clean:
 
 distclean: clean
 	rm -rf _build
-	rm -f rebar.lock
 
 upgrade:
 	rebar3 upgrade --all

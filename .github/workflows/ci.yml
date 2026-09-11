@@ -34,6 +34,7 @@ jobs:
           fetch-depth: 0
 
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        id: setup
         with:
           otp-version: ${{ matrix.otp-version }}
           rebar3-version: 3.26.0
@@ -41,9 +42,15 @@ jobs:
       - name: Cache the dialyzer PLT 🗄️
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
-          path: _build/dialyzer/*_plt*
-          key: plt-${{ runner.os }}-otp${{ matrix.otp-version }}-${{ hashFiles('rebar.config') }}
-          restore-keys: plt-${{ runner.os }}-otp${{ matrix.otp-version }}-
+          # The base PLT -- all of OTP, and the slow half -- is built in the
+          # global cache dir and only then copied into _build, so caching the
+          # copy alone rebuilds it on every run. Both paths, keyed on the exact
+          # OTP version the PLT is named after.
+          path: |
+            ~/.cache/rebar3/rebar3_*_plt
+            _build/dialyzer/*_plt*
+          key: plt-${{ runner.os }}-otp${{ steps.setup.outputs.otp-version }}-${{ hashFiles('rebar.config') }}
+          restore-keys: plt-${{ runner.os }}-otp${{ steps.setup.outputs.otp-version }}-
 
       - name: Run the CI suite 🏃🏾
         run: make ci
@@ -73,7 +80,7 @@ jobs:
       - name: Update rebar.lock 🔒
         run: |
           ORIGIN="origin/${{ github.event.repository.default_branch }}"
-          if git diff --quiet --exit-code "${ORIGIN}"..HEAD -- rebar.config; then
+          if git diff --quiet --exit-code "${ORIGIN}"...HEAD -- rebar.config; then
             echo "ℹ️ rebar.config untouched, nothing to do."
             exit 0
           fi
