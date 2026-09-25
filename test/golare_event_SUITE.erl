@@ -18,6 +18,7 @@ all() ->
         exception,
         exception_handled,
         exception_in_app,
+        exception_frame_without_fileinfo,
         message,
         request,
         thread,
@@ -125,6 +126,44 @@ exception_in_app(_Config) ->
         },
         Result
     ),
+    ?assertJSON(Result).
+
+exception_frame_without_fileinfo(_Config) ->
+    %% Raw process stacktraces contain BIF frames with no file/line info, e.g.
+    %% `{erlang, apply, 2, []}`. The frame builder must not crash on these and
+    %% must omit abs_path/lineno rather than emit them as undefined.
+    Result = golare:event(#{}, [
+        golare_interface:exception(error, badarith, [
+            {my_module, my_fun, 1, [{file, "/app/src/my_module.erl"}, {line, 7}]},
+            {erlang, apply, 2, []}
+        ])
+    ]),
+    ?assertMatch(
+        #{
+            exception := [
+                #{
+                    type := error,
+                    value := ~"badarith",
+                    stacktrace := #{
+                        frames := [
+                            #{function := ~"apply/2", filename := erlang, in_app := false},
+                            #{
+                                function := ~"my_fun/1",
+                                filename := my_module,
+                                in_app := true,
+                                abs_path := ~"/app/src/my_module.erl",
+                                lineno := 7
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        Result
+    ),
+    #{exception := [#{stacktrace := #{frames := [BifFrame | _]}}]} = Result,
+    ?assertNot(is_map_key(abs_path, BifFrame)),
+    ?assertNot(is_map_key(lineno, BifFrame)),
     ?assertJSON(Result).
 
 message(_Config) ->
