@@ -173,13 +173,22 @@ exception_stacktrace_frame({Module, Function, Args, Meta}) ->
             A when is_list(A) -> length(A)
         end,
     File = proplists:get_value(file, Meta),
-    #{
+    Frame0 = #{
         in_app => exception_stacktrace_frame_in_app(File),
         function => iolist_to_binary(io_lib:format("~p/~p", [Function, Arity])),
-        filename => Module,
-        abs_path => iolist_to_binary(File),
-        lineno => proplists:get_value(line, Meta)
-    }.
+        filename => Module
+    },
+    % Raw process stacktraces (e.g. BIF frames like `{erlang, apply, 2, []}`)
+    % may carry no file or line, so only add those keys when present.
+    Frame1 =
+        case File of
+            undefined -> Frame0;
+            _ -> Frame0#{abs_path => iolist_to_binary(File)}
+        end,
+    case proplists:get_value(line, Meta) of
+        undefined -> Frame1;
+        Line -> Frame1#{lineno => Line}
+    end.
 
 exception_stacktrace_frame_in_app("/" ++ _ = File) ->
     % Rebar3 keeps dependency source trees under `_build`, so absolute paths
