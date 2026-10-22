@@ -19,7 +19,7 @@ concurrency:
 jobs:
   ci:
     name: ci (OTP ${{ matrix.otp-version }})
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     strategy:
       fail-fast: false
@@ -61,7 +61,7 @@ jobs:
   rebar-lock:
     needs: [ci]
     if: startsWith(github.head_ref, 'renovate/')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
     steps:
@@ -109,7 +109,7 @@ jobs:
   release:
     needs: [ci]
     if: github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'no-release') == false
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
     steps:
